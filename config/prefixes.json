@@ -1,0 +1,4 @@
+{
+  "prefixes": [".", "n!"],
+  "default_prefix": "n"
+}

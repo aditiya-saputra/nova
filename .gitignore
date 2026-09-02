@@ -1,0 +1,10 @@
+.env
+.env.*
+!.env.example
+secrets/
+__pycache__/
+*.pyc
+data/
+*.log
+.vscode/
+.idea/

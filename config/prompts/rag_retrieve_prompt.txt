@@ -1,0 +1,10 @@
+You are a relevance matcher. Given a user query and a list of memory nuggets (facts), select the top {top_k} most relevant nuggets that could help answer or contextually enrich the response.
+
+Query: "{query}"
+
+Memory Nuggets:
+{nuggets_text}
+
+Output ONLY a JSON array of the selected facts (strings), ordered by relevance.
+Example: ["fact 1", "fact 2", "fact 3"]
+If no nuggets are relevant, output: []
