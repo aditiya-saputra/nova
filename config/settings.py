@@ -21,6 +21,7 @@ class Settings:
 
     GEMINI_API_KEYS = [k.strip() for k in os.getenv("GEMINI_API_KEYS", "").split(",") if k.strip()]
     GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
+    GEMINI_FALLBACK_MODELS = [m.strip() for m in os.getenv("GEMINI_FALLBACK_MODELS", "").split(",") if m.strip()]
     GEMINI_CONTEXT_LIMIT = int(os.getenv("GEMINI_CONTEXT_LIMIT", "1048576"))
     GEMINI_OUTPUT_LIMIT = int(os.getenv("GEMINI_OUTPUT_LIMIT", "65536"))
 

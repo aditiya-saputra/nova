@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [1.4.2] - 2026-09-04
+
+### ✨ Added
+- **Model Fallback Routing**: `GeminiClient` now supports automatic model fallback via `GEMINI_FALLBACK_MODELS` config. When the primary model returns a 404 NOT_FOUND error, the client automatically rotates through the fallback list (`model_chain`). All generation methods (`generate`, `chat`, `generate_with_tools`, `synthesize_with_tool_result`, `generate_with_images`) use the shared `_run_with_fallback()` helper.
+- **`config/settings.py`**: Added `GEMINI_FALLBACK_MODELS` setting (comma-separated model IDs). Empty by default — no fallback unless configured.
+
+### 🛠 Changed
+- **`services/gemini_client.py`**: Refactored error handling into `_is_not_found_error()` and `_run_with_fallback()` helpers. All public methods now delegate to `_run_with_fallback()` instead of duplicating key-rotation + error-handling loops.
+- **`.env`**: Added `GEMINI_FALLBACK_MODELS=gemini-3.0-flash,gemini-3.6-flash`. Primary model still `gemini-2.5-flash` (stale; will trigger fallback on next run).
+- **`.env.example`**: Added `GEMINI_FALLBACK_MODELS` example line.
+
+---
+
 ## [1.4.1] - 2026-09-03
 
 ### 🐛 Fixed (Security)

@@ -8,6 +8,8 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+NOT_FOUND_CODES = [404, "404", "NOT_FOUND"]
+
 
 class GeminiClient:
     def __init__(self, settings: Settings):
@@ -15,6 +17,13 @@ class GeminiClient:
         self.keys = settings.GEMINI_API_KEYS
         self.current_index = 0
         self.model_name = settings.GEMINI_MODEL
+        self.fallback_models = settings.GEMINI_FALLBACK_MODELS
+        self.model_chain = [self.model_name] + self.fallback_models
+
+    def _is_not_found_error(self, e):
+        code = getattr(e, "code", None) or getattr(e, "status_code", None)
+        msg = str(e)
+        return code in NOT_FOUND_CODES or "NOT_FOUND" in msg or "no longer available" in msg.lower()
 
     def _get_next_key(self):
         if not self.keys:
@@ -53,68 +62,68 @@ class GeminiClient:
             logger.error(f"Error extracting response text: {e}")
         return str(response)
 
-    async def generate(self, prompt, system_instruction=None, history=None):
+    async def _run_with_fallback(self, fn, label_prefix=""):
         last_error = None
-        for attempt in range(len(self.keys)):
-            api_key = self._get_next_key()
-            try:
-                client = self._get_client(api_key)
-                config = self._build_config(system_instruction)
-
-                logger.info(f"Generating with model: {self.model_name}")
-
-                if history:
-                    chat = client.aio.chats.create(
-                        model=self.model_name,
-                        history=history,
-                        config=config
-                    )
-                    response = await chat.send_message(prompt)
-                else:
-                    response = await client.aio.models.generate_content(
-                        model=self.model_name,
-                        contents=prompt,
-                        config=config
-                    )
-
-                return self._extract_response_text(response)
-            except Exception as e:
-                last_error = e
-                code = getattr(e, "code", None) or getattr(e, "status_code", None)
-                if code in [503, 429] or "429" in str(e) or "503" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                    wait_time = (2 ** attempt) + random.uniform(0, 1)
-                    logger.warning(f"Gemini rate limited/unavailable ({e}), retrying key {attempt+1}/{len(self.keys)} in {wait_time:.1f}s")
-                    await asyncio.sleep(wait_time)
-                    continue
-                raise
+        for model in self.model_chain:
+            self.model_name = model
+            logger.info(f"Trying model: {model}")
+            for attempt in range(len(self.keys)):
+                api_key = self._get_next_key()
+                try:
+                    result = await fn(api_key)
+                    if model != self.model_name:
+                        logger.info(f"Switched to model: {model} (fallback)")
+                    return result
+                except Exception as e:
+                    last_error = e
+                    if self._is_not_found_error(e):
+                        logger.warning(f"Model {model} not available ({e}), trying next model...")
+                        break
+                    code = getattr(e, "code", None) or getattr(e, "status_code", None)
+                    if code in [503, 429] or "429" in str(e) or "503" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                        wait_time = (2 ** attempt) + random.uniform(0, 1)
+                        logger.warning(f"Gemini rate limited/unavailable ({e}), retrying key {attempt+1}/{len(self.keys)} in {wait_time:.1f}s")
+                        await asyncio.sleep(wait_time)
+                        continue
+                    raise
+        logger.error(f"All models failed. Last error: {last_error}")
         raise last_error
 
-    async def chat(self, messages, system_instruction=None):
-        last_error = None
-        for attempt in range(len(self.keys)):
-            api_key = self._get_next_key()
-            try:
-                client = self._get_client(api_key)
-                config = self._build_config(system_instruction)
-
+    async def generate(self, prompt, system_instruction=None, history=None):
+        async def _call(api_key):
+            client = self._get_client(api_key)
+            config = self._build_config(system_instruction)
+            logger.info(f"Generating with model: {self.model_name}")
+            if history:
                 chat = client.aio.chats.create(
                     model=self.model_name,
+                    history=history,
                     config=config
                 )
-                return chat
-            except Exception as e:
-                last_error = e
-                code = getattr(e, "code", None) or getattr(e, "status_code", None)
-                if code in [503, 429] or "429" in str(e) or "503" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                    wait_time = (2 ** attempt) + random.uniform(0, 1)
-                    logger.warning(f"Gemini rate limited/unavailable ({e}), retrying key {attempt+1}/{len(self.keys)} in {wait_time:.1f}s")
-                    await asyncio.sleep(wait_time)
-                    continue
-                raise
-        raise last_error
+                response = await chat.send_message(prompt)
+            else:
+                response = await client.aio.models.generate_content(
+                    model=self.model_name,
+                    contents=prompt,
+                    config=config
+                )
+            return self._extract_response_text(response)
+
+        return await self._run_with_fallback(_call, "generate")
+
+    async def chat(self, messages, system_instruction=None):
+        async def _call(api_key):
+            client = self._get_client(api_key)
+            config = self._build_config(system_instruction)
+            chat = client.aio.chats.create(
+                model=self.model_name,
+                config=config
+            )
+            return chat
+
+        return await self._run_with_fallback(_call, "chat")
 
     async def generate_with_tools(self, prompt, tools, system_instruction=None, history=None):
-        last_error = None
         flat_tools = []
         for t in tools:
             flat_tools.append(types.FunctionDeclaration(
@@ -132,112 +141,73 @@ class GeminiClient:
         if system_instruction:
             config.system_instruction = system_instruction
 
-        for attempt in range(len(self.keys)):
-            api_key = self._get_next_key()
-            try:
-                client = self._get_client(api_key)
+        async def _call(api_key):
+            client = self._get_client(api_key)
+            logger.info(f"Generating with tools: {self.model_name}")
+            if history:
+                chat = client.aio.chats.create(
+                    model=self.model_name,
+                    history=history,
+                    config=config
+                )
+                response = await chat.send_message(prompt)
+            else:
+                response = await client.aio.models.generate_content(
+                    model=self.model_name,
+                    contents=prompt,
+                    config=config
+                )
+            response_text = self._extract_response_text(response)
+            if response.candidates and response.candidates[0].content.parts:
+                for part in response.candidates[0].content.parts:
+                    if hasattr(part, 'function_call') and part.function_call:
+                        return {
+                            "type": "tool_call",
+                            "tool": part.function_call.name,
+                            "args": dict(part.function_call.args)
+                        }
+            return {"type": "text", "text": response_text}
 
-                logger.info(f"Generating with tools: {self.model_name}")
-
-                if history:
-                    chat = client.aio.chats.create(
-                        model=self.model_name,
-                        history=history,
-                        config=config
-                    )
-                    response = await chat.send_message(prompt)
-                else:
-                    response = await client.aio.models.generate_content(
-                        model=self.model_name,
-                        contents=prompt,
-                        config=config
-                    )
-
-                response_text = self._extract_response_text(response)
-
-                if response.candidates and response.candidates[0].content.parts:
-                    for part in response.candidates[0].content.parts:
-                        if hasattr(part, 'function_call') and part.function_call:
-                            return {
-                                "type": "tool_call",
-                                "tool": part.function_call.name,
-                                "args": dict(part.function_call.args)
-                            }
-                return {"type": "text", "text": response_text}
-            except Exception as e:
-                last_error = e
-                code = getattr(e, "code", None) or getattr(e, "status_code", None)
-                if code in [503, 429] or "429" in str(e) or "503" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                    wait_time = (2 ** attempt) + random.uniform(0, 1)
-                    logger.warning(f"Gemini rate limited/unavailable ({e}), retrying key {attempt+1}/{len(self.keys)} in {wait_time:.1f}s")
-                    await asyncio.sleep(wait_time)
-                    continue
-                raise
-        raise last_error
+        return await self._run_with_fallback(_call, "generate_with_tools")
 
     async def synthesize_with_tool_result(self, original_prompt, tool_result, system_instruction=None):
-        last_error = None
-        for attempt in range(len(self.keys)):
-            api_key = self._get_next_key()
-            try:
-                client = self._get_client(api_key)
-                config = self._build_config(system_instruction)
-
-                prompt = f"""Original request: {original_prompt}
+        config = self._build_config(system_instruction)
+        prompt = f"""Original request: {original_prompt}
 
 Tool execution result:
 {json.dumps(tool_result, indent=2) if isinstance(tool_result, dict) else str(tool_result)}
 
 Based on the tool result above, provide a helpful response to the user."""
 
-                response = await client.aio.models.generate_content(
-                    model=self.model_name,
-                    contents=prompt,
-                    config=config
-                )
-                return self._extract_response_text(response)
-            except Exception as e:
-                last_error = e
-                code = getattr(e, "code", None) or getattr(e, "status_code", None)
-                if code in [503, 429] or "429" in str(e) or "503" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                    wait_time = (2 ** attempt) + random.uniform(0, 1)
-                    logger.warning(f"Gemini rate limited/unavailable ({e}), retrying key {attempt+1}/{len(self.keys)} in {wait_time:.1f}s")
-                    await asyncio.sleep(wait_time)
-                    continue
-                raise
-        raise last_error
+        async def _call(api_key):
+            client = self._get_client(api_key)
+            response = await client.aio.models.generate_content(
+                model=self.model_name,
+                contents=prompt,
+                config=config
+            )
+            return self._extract_response_text(response)
+
+        return await self._run_with_fallback(_call, "synthesize_with_tool_result")
 
     async def generate_with_images(self, prompt, images, system_instruction=None):
-        last_error = None
-        for attempt in range(len(self.keys)):
-            api_key = self._get_next_key()
-            try:
-                client = self._get_client(api_key)
-                config = self._build_config(system_instruction)
+        config = self._build_config(system_instruction)
+        contents = []
+        contents.append(types.Part(text=prompt))
+        for img in images:
+            contents.append(types.Part(inline_data=types.Blob(
+                mime_type=img["mime_type"],
+                data=img["data"]
+            )))
 
-                contents = []
-                contents.append(types.Part(text=prompt))
-                for img in images:
-                    contents.append(types.Part(inline_data=types.Blob(
-                        mime_type=img["mime_type"],
-                        data=img["data"]
-                    )))
+        async def _call(api_key):
+            client = self._get_client(api_key)
+            logger.info(f"Generating VLM with model: {self.model_name}, images: {len(images)}")
+            response = await client.aio.models.generate_content(
+                model=self.model_name,
+                contents=contents,
+                config=config
+            )
+            return self._extract_response_text(response)
 
-                logger.info(f"Generating VLM with model: {self.model_name}, images: {len(images)}")
-
-                response = await client.aio.models.generate_content(
-                    model=self.model_name,
-                    contents=contents,
-                    config=config
-                )
-                return self._extract_response_text(response)
-            except Exception as e:
-                last_error = e
-                code = getattr(e, "code", None) or getattr(e, "status_code", None)
-                if code in [503, 429] or "429" in str(e) or "503" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                    wait_time = (2 ** attempt) + random.uniform(0, 1)
-                    logger.warning(f"Gemini VLM rate limited ({e}), retrying key {attempt+1}/{len(self.keys)} in {wait_time:.1f}s")
-                    await asyncio.sleep(wait_time)
-                    continue
-                raise
-        raise last_error
+        return await self._run_with_fallback(_call, "generate_with_images")
