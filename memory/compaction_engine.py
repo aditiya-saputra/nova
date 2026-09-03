@@ -32,7 +32,6 @@ class CompactionEngine:
             summary = self.groq_client.compact(history, system_prompt)
 
             self.session_manager.replace_history(key, summary)
-            self.history_store.append_compaction(key, user_id, summary)
 
             usage_after = self.session_manager.get_token_usage(key)
             logger.info(f"Compacted session {key}: {usage:.1%} -> {usage_after:.1%}")

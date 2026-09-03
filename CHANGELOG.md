@@ -4,6 +4,38 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [1.4.1] - 2026-09-03
+
+### 🐛 Fixed (Security)
+- **SSRF via redirect (`browserless_client.fetch_image`)**: Replaced `allow_redirects=True` with manual hop loop (max 5), validating each `Location` header through `_is_safe_url`. Attacker can no longer pivot public URL → internal IP via 302.
+- **SSRF prefix bypass (`browserless_client._is_safe_url`)**: Replaced string-prefix matching (`hostname.startswith('10.')` — `10evil.com` slipped through) with `ipaddress` stdlib checks (`is_private`/`is_loopback`/`is_linkage_local`/`is_reserved`/`is_multicast`/`is_unspecified`) for IP literals + dot-bounded suffix matching for hostnames. Covers IPv4 and IPv6 (RFC1918, ULA, link-local, loopback).
+- **Token leak in git remote URL (`github_backup._get_auth_url`)**: Removed inline-credential URL pattern (`https://token@github.com/...`). Token now applied via repo-local `git config http.<host>/.extraheader` + `http.<host>/.token` and redacted from all `subprocess` stdout/stderr via `_safe_run` wrapper. Token no longer exposed in `git remote -v`, error logs, or process listings.
+
+### 🐛 Fixed (Data Integrity)
+- **Git branch force-rename clobber (`github_backup.init_repo`)**: Replaced `git branch -M main` (force rename, overwrites remote `main`) with `git branch -m main` (only if current branch differs). Existing remote history no longer destroyed on re-init.
+- **Concurrent backup race (`github_backup._backup_sync`)**: Added `threading.Lock` guard. Multiple callers (TTL prune job + message-threshold trigger + scheduled tick) no longer collide on `.git/index.lock` or interleave `git add`/`commit`/`push` operations.
+- **Sync method in async loop (`github_backup.increment_counter` + `backup`)**: `backup()` now `async` wrapper around `asyncio.to_thread(self._backup_sync)`. `increment_counter()` returns pure decision bool. Callers in `message_handler.py:200` and `scheduled_jobs.py:105` updated to `await`. Event loop no longer blocked by subprocess sync calls.
+- **Audit log fire-and-forget loss (`github_backup._schedule_audit`)**: `asyncio.create_task` calls now guarded by `loop.create_task` inside `try/except RuntimeError`. Best-effort audit persists, no exception swallowed silently when no loop is running.
+
+### 🐛 Fixed (Reliability)
+- **Dead retry code (`browserless_client.fetch_with_retry`)**: Original logic returned on every error because `fetch_content` set `safe: False` for all errors (including transient 5xx). Added `transient` flag (HTTP 429/500/502/503/504 + exceptions), `fetch_with_retry` now respects it with exponential backoff (1s, 2s). Real transient failures retry; permanent failures (4xx, unsafe URL) still bail immediately.
+
+### 🐛 Fixed (Prompt Injection)
+- **False-positive injection filter (`browserless_client.INJECTION_PATTERNS`)**: Removed overly broad patterns (`IMPORTANT:`, `CRITICAL:`, `URGENT:`, `you must`, `do not`, `never`, `always respond`) that blocked legitimate news/text content. Retained specific injection phrasings (`ignore previous instructions`, `you are now a/an`, `disregard all`, `system prompt:`, `jailbreak`, `DAN mode`, etc.) with stricter anchoring.
+
+### 🐛 Fixed (Amnesia)
+- **Session amnesia on restart (`session_manager.SessionManager`)**: `SessionManager` now accepts `history_store` and lazy-hydrates from disk on first access per channel key (`hydrate_from_disk`). In-memory `defaultdict(list)` no longer starts empty on bot startup — restart preserves all prior conversation.
+- **Idle timeout amnesia**: Removed auto-clear on `SESSION_TIMEOUT` in `_cleanup_expired`. Sessions persist indefinitely on disk; pruning handled by weekly disk cleanup (7-day TTL via `HISTORY_CLEANUP_DAYS`).
+- **Compaction wiped in-memory only (`session_manager.replace_history`)**: Now also persists summary + last 4 tail messages to `HistoryStore`. Compaction result survives restart. CompactionEngine `append_compaction` call removed (now handled inside `replace_history`).
+- **TTL cleanup crash on float timestamps (`scheduled_jobs.run_cleanup_history`)**: `datetime.fromisoformat(time.time())` raised uncaught `ValueError` per entry (history was stored as float epoch). Added `_entry_timestamp` helper handling float/int/ISO/missing formats. Cleanup count now accurate (`cleaned` counter incremented per entry removed).
+
+### 🛠 Changed
+- **`session_manager.replace_history` signature**: New optional kwarg `tail_keep=4` controls how many recent messages survive compaction alongside the summary.
+- **`compaction_engine.check_and_compact`**: Dropped redundant `history_store.append_compaction` call (now done inside `replace_history`).
+- **`main.py`**: `SessionManager(settings, history_store)` wiring — history_store must be instantiated first.
+
+---
+
 ## [1.4.0] - 2026-09-02
 
 ### ✨ Added

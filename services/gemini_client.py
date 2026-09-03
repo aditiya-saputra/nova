@@ -120,7 +120,7 @@ class GeminiClient:
             flat_tools.append(types.FunctionDeclaration(
                 name=t["name"],
                 description=t["description"],
-                parameters=t.get("parameters", {})
+                parameters_json_schema=t.get("parameters", {})
             ))
         tool_declarations = types.Tool(function_declarations=flat_tools)
 

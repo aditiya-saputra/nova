@@ -29,8 +29,8 @@ async def main():
     groq = GroqClient(settings)
     tavily = TavilyClient(settings)
     browserless = BrowserlessClient(settings)
-    session_manager = SessionManager(settings)
     history_store = HistoryStore(settings)
+    session_manager = SessionManager(settings, history_store)
     rag_store = RagStore(settings)
     context_builder = ContextBuilder(settings)
     audit_logger = AuditLogger(settings)
@@ -106,11 +106,21 @@ async def main():
 
     try:
         await bot.start(settings.DISCORD_TOKEN)
-    except KeyboardInterrupt:
-        await audit_logger.log_shutdown("keyboard_interrupt")
-        await scheduled_jobs.stop()
-        await bot.close()
+    finally:
+        try:
+            await audit_logger.log_shutdown("normal")
+        except Exception:
+            pass
+        try:
+            await scheduled_jobs.stop()
+        except Exception:
+            pass
+        if not bot.is_closed():
+            await bot.close()
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass

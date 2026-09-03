@@ -76,14 +76,14 @@ class ScheduledJobs:
                         for line in f:
                             try:
                                 record = json.loads(line.strip())
-                                ts = record.get("created_at", 0)
+                                ts = record.get("created_at") or record.get("timestamp") or 0
                                 if isinstance(ts, str):
                                     ts = datetime.fromisoformat(ts).timestamp()
                                 if ts >= cutoff_time:
                                     kept_records.append(record)
                                 else:
                                     deleted_count += 1
-                            except (json.JSONDecodeError, KeyError):
+                            except (json.JSONDecodeError, KeyError, ValueError):
                                 kept_records.append(record)
 
                     if deleted_count > 0:
@@ -102,7 +102,7 @@ class ScheduledJobs:
             logger.info(f"TTL prune complete: {files_scanned} files, {records_deleted} records deleted")
 
             if self.github_backup and self.github_backup.backup_enabled:
-                await asyncio.to_thread(self.github_backup.backup, "ttl_prune")
+                await self.github_backup.backup("ttl_prune")
 
         except Exception as e:
             logger.error(f"TTL prune error: {e}")
@@ -129,22 +129,22 @@ class ScheduledJobs:
 
                 try:
                     kept_lines = []
+                    file_cleaned = 0
                     with open(filepath, "r", encoding="utf-8") as f:
                         for line in f:
                             try:
                                 entry = json.loads(line.strip())
-                                ts_str = entry.get("timestamp", "")
-                                if ts_str:
-                                    ts = datetime.fromisoformat(ts_str).timestamp()
-                                    if ts >= cutoff_time:
-                                        kept_lines.append(line)
-                                else:
+                                ts = self._entry_timestamp(entry)
+                                if ts is None or ts >= cutoff_time:
                                     kept_lines.append(line)
-                            except (json.JSONDecodeError, KeyError):
+                                else:
+                                    file_cleaned += 1
+                            except json.JSONDecodeError:
                                 kept_lines.append(line)
 
                     with open(filepath, "w", encoding="utf-8") as f:
                         f.writelines(kept_lines)
+                    cleaned += file_cleaned
 
                 except Exception as e:
                     logger.error(f"Error cleaning {filename}: {e}")
@@ -153,6 +153,18 @@ class ScheduledJobs:
 
         except Exception as e:
             logger.error(f"History cleanup error: {e}")
+
+    @staticmethod
+    def _entry_timestamp(entry):
+        ts = entry.get("timestamp")
+        if ts is None or ts == "":
+            return None
+        if isinstance(ts, (int, float)):
+            return float(ts)
+        try:
+            return datetime.fromisoformat(ts).timestamp()
+        except (ValueError, TypeError):
+            return None
 
     def get_status(self):
         return {

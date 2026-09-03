@@ -9,60 +9,56 @@ logger = get_logger(__name__)
 # Dangerous patterns for prompt injection
 INJECTION_PATTERNS = [
     r'(?i)ignore\s+(all\s+)?previous\s+instructions',
-    r'(?i)you\s+are\s+now\s+',
-    r'(?i)act\s+as\s+if',
-    r'(?i)pretend\s+you\s+are',
-    r'(?i)disregard\s+',
-    r'(?i)forget\s+everything',
-    r'(?i)new\s+instructions?\s*:',
-    r'(?i)system\s*prompt\s*:',
-    r'(?i)IMPORTANT\s*:\s*',
-    r'(?i)CRITICAL\s*:\s*',
-    r'(?i)URGENT\s*:\s*',
-    r'(?i)you\s+must\s+',
-    r'(?i)do\s+not\s+',
-    r'(?i)never\s+',
-    r'(?i)always\s+respond',
-    r'(?i)from\s+now\s+on',
-    r'(?i)override\s+',
-    r'(?i)bypass\s+',
-    r'(?i)jailbreak',
+    r'(?i)disregard\s+(all\s+)?(previous|prior|above)',
+    r'(?i)forget\s+everything\s+(above|before|prior)',
+    r'(?i)new\s+instructions?\s*:\s*',
+    r'(?i)system\s*prompt\s*:\s*',
+    r'(?i)you\s+are\s+now\s+(a|an|the|my)\s+',
+    r'(?i)act\s+as\s+(a|an|the|my)\s+',
+    r'(?i)pretend\s+(to\s+be|you\s+are)\s+',
+    r'(?i)from\s+now\s+on,?\s+(you|ignore|always|never)',
+    r'(?i)override\s+(system|safety|all)\s+',
+    r'(?i)bypass\s+(safety|filter|guard)',
+    r'(?i)\bjailbreak\b',
     r'(?i)DAN\s+mode',
     r'(?i)developer\s+mode',
-    r'(?i)admin\s+mode',
-    r'(?i)<\s*script',
-    r'(?i)<\s*iframe',
+    r'(?i)<\s*script\b',
+    r'(?i)<\s*iframe\b',
     r'(?i)javascript\s*:',
-    r'(?i)onerror\s*=',
-    r'(?i)onload\s*=',
+    r'(?i)\bonerror\s*=',
+    r'(?i)\bonload\s*=',
 ]
 
-# Blocked domains for safety
-BLOCKED_DOMAINS = [
-    'localhost',
-    '127.0.0.1',
-    '0.0.0.0',
-    '10.',
-    '192.168.',
-    '172.16.',
-    '172.17.',
-    '172.18.',
-    '172.19.',
-    '172.20.',
-    '172.21.',
-    '172.22.',
-    '172.23.',
-    '172.24.',
-    '172.25.',
-    '172.26.',
-    '172.27.',
-    '172.28.',
-    '172.29.',
-    '172.30.',
-    '172.31.',
-    '169.254.',
-    '[::1]',
+# Blocked for SSRF prevention. Each entry: (match_type, value)
+# match_type "exact" checks hostname equality; "suffix" checks hostname ends with "."+value (subdomain safe);
+# "octet" checks IPv4 first-octet CIDR; "ipv6" checks literal IPv6 loopback/ULA.
+BLOCKED_RULES = [
+    ('exact', 'localhost'),
+    ('octet', '127'),
+    ('octet', '0'),
+    ('octet', '10'),
+    ('octet', '192.168'),
+    ('octet', '172.16'), ('octet', '172.17'), ('octet', '172.18'), ('octet', '172.19'),
+    ('octet', '172.20'), ('octet', '172.21'), ('octet', '172.22'), ('octet', '172.23'),
+    ('octet', '172.24'), ('octet', '172.25'), ('octet', '172.26'), ('octet', '172.27'),
+    ('octet', '172.28'), ('octet', '172.29'), ('octet', '172.30'), ('octet', '172.31'),
+    ('octet', '169.254'),
+    ('ipv6', '::1'),
+    ('ipv6', 'fc00::/7'),
+    ('ipv6', 'fe80::/10'),
 ]
+
+
+def _ip_in_blocked(ip_str: str) -> bool:
+    import ipaddress
+    try:
+        ip = ipaddress.ip_address(ip_str)
+    except ValueError:
+        return False
+    return (
+        ip.is_private or ip.is_loopback or ip.is_link_local
+        or ip.is_reserved or ip.is_multicast or ip.is_unspecified
+    )
 
 
 class BrowserlessClient:
@@ -80,11 +76,25 @@ class BrowserlessClient:
                 return False, "Only HTTP/HTTPS URLs are allowed"
 
             hostname = parsed.hostname or ''
-            for blocked in BLOCKED_DOMAINS:
-                if hostname == blocked or hostname.startswith(blocked):
+            if not hostname:
+                return False, "Invalid hostname"
+
+            import ipaddress
+            try:
+                ip = ipaddress.ip_address(hostname)
+                if _ip_in_blocked(hostname):
+                    return False, f"Access to {hostname} is blocked"
+            except ValueError:
+                pass
+
+            host_lower = hostname.lower().rstrip('.')
+            for kind, value in BLOCKED_RULES:
+                if kind == 'exact' and host_lower == value:
+                    return False, f"Access to {hostname} is blocked"
+                if kind == 'suffix' and (host_lower == value or host_lower.endswith('.' + value)):
                     return False, f"Access to {hostname} is blocked"
 
-            if not hostname or '.' not in hostname:
+            if '.' not in host_lower:
                 return False, "Invalid hostname"
 
             return True, "OK"
@@ -203,7 +213,12 @@ class BrowserlessClient:
                 ) as resp:
                     if resp.status != 200:
                         error_text = await resp.text()
-                        return {"error": f"Browserless error: {resp.status} - {error_text}", "safe": False}
+                        transient = resp.status in (429, 500, 502, 503, 504)
+                        return {
+                            "error": f"Browserless error: {resp.status} - {error_text}",
+                            "safe": False,
+                            "transient": transient,
+                        }
 
                     if mode in ("pdf", "screenshot"):
                         data = await resp.read()
@@ -237,16 +252,18 @@ class BrowserlessClient:
 
         except Exception as e:
             logger.error(f"Browserless fetch error: {e}")
-            return {"error": f"Fetch failed: {str(e)}", "safe": False}
+            return {"error": f"Fetch failed: {str(e)}", "safe": False, "transient": True}
 
     async def fetch_with_retry(self, url, mode="markdown", retries=2):
         for attempt in range(retries + 1):
             result = await self.fetch_content(url, mode)
-            if result.get("success") or not result.get("safe", True):
+            if result.get("success"):
+                return result
+            if not result.get("transient", False):
                 return result
             if attempt < retries:
                 import asyncio
-                await asyncio.sleep(1)
+                await asyncio.sleep(2 ** attempt)
         return result
 
     async def fetch_image(self, url):
@@ -264,31 +281,43 @@ class BrowserlessClient:
                 "Authorization": f"Bearer {self.api_token}",
             }
 
-            async with aiohttp.ClientSession() as session:
-                async with session.get(
-                    url,
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=30),
-                    allow_redirects=True
-                ) as resp:
-                    if resp.status != 200:
-                        return {"error": f"HTTP {resp.status}", "safe": False}
+            current_url = url
+            for _ in range(5):
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(
+                        current_url,
+                        headers=headers,
+                        timeout=aiohttp.ClientTimeout(total=30),
+                        allow_redirects=False
+                    ) as resp:
+                        if resp.status in (301, 302, 303, 307, 308):
+                            location = resp.headers.get("Location", "")
+                            if not location:
+                                return {"error": "Redirect without Location", "safe": False}
+                            safe, reason = self._is_safe_url(location)
+                            if not safe:
+                                return {"error": f"Redirect blocked: {reason}", "safe": False}
+                            current_url = location
+                            continue
+                        if resp.status != 200:
+                            return {"error": f"HTTP {resp.status}", "safe": False}
 
-                    content_type = resp.content_type or ""
-                    if not content_type.startswith("image/"):
-                        return {"error": f"Not an image: {content_type}", "safe": False}
+                        content_type = resp.content_type or ""
+                        if not content_type.startswith("image/"):
+                            return {"error": f"Not an image: {content_type}", "safe": False}
 
-                    data = await resp.read()
-                    if len(data) > 20 * 1024 * 1024:
-                        return {"error": "Image too large (max 20MB)", "safe": False}
+                        data = await resp.read()
+                        if len(data) > 20 * 1024 * 1024:
+                            return {"error": "Image too large (max 20MB)", "safe": False}
 
-                    return {
-                        "success": True,
-                        "mime_type": content_type,
-                        "data": data,
-                        "size": len(data),
-                        "safe": True
-                    }
+                        return {
+                            "success": True,
+                            "mime_type": content_type,
+                            "data": data,
+                            "size": len(data),
+                            "safe": True
+                        }
+            return {"error": "Too many redirects", "safe": False}
 
         except Exception as e:
             logger.error(f"Browserless fetch_image error: {e}")

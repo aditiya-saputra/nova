@@ -1,10 +1,15 @@
 import os
+import re
 import subprocess
+import threading
 import time
 from datetime import datetime
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+_TOKEN_HEADER_NAME = "Authorization"
+_TOKEN_HEADER_VALUE_PREFIX = "token "
 
 
 class GitHubBackup:
@@ -19,17 +24,59 @@ class GitHubBackup:
         self.backup_interval_messages = 10
         self.backup_interval_time = 3600
         self._audit_logger = None
+        self._backup_lock = threading.Lock()
+        self._counter_lock = threading.Lock()
+        self._token_applied = False
+        self._canonical_repo_host = self._parse_host(self.repo_url)
 
     def attach_audit(self, audit_logger):
         self._audit_logger = audit_logger
 
-    def _get_auth_url(self):
-        if self.github_token and self.repo_url:
-            if "https://" in self.repo_url:
-                return self.repo_url.replace("https://", f"https://{self.github_token}@")
-            else:
-                return f"https://{self.github_token}@github.com/{self.repo_url.split('github.com/')[-1]}"
-        return self.repo_url
+    @staticmethod
+    def _parse_host(url):
+        if not url:
+            return ""
+        m = re.match(r'https?://([^/]+)/', url + "/")
+        return m.group(1).lower() if m else ""
+
+    def _redact(self, text):
+        if not text or not self.github_token:
+            return text
+        return text.replace(self.github_token, "***")
+
+    def _safe_run(self, *args, **kwargs):
+        kwargs.setdefault("capture_output", True)
+        kwargs.setdefault("text", True)
+        result = subprocess.run(args, **kwargs)
+        if result.stderr and self.github_token:
+            result.stderr = self._redact(result.stderr)
+        if result.stdout and self.github_token:
+            result.stdout = self._redact(result.stdout)
+        return result
+
+    def _apply_token_to_remote(self):
+        if self._token_applied or not self.github_token or not self._canonical_repo_host:
+            return
+        try:
+            self._safe_run(
+                "git", "config",
+                f"http.{self._canonical_repo_host}/.extraheader",
+                f"AUTHORIZATION: {_TOKEN_HEADER_VALUE_PREFIX}{self.github_token}",
+                cwd=self.data_dir, check=True,
+            )
+            self._safe_run(
+                "git", "config",
+                f"http.{self._canonical_repo_host}/.token",
+                f"x-access-token:{self.github_token}",
+                cwd=self.data_dir, check=True,
+            )
+            self._safe_run(
+                "git", "remote", "set-url", "origin", self.repo_url,
+                cwd=self.data_dir, check=True,
+            )
+            self._token_applied = True
+        except Exception as e:
+            logger.error(f"Failed to apply token to remote: {self._redact(str(e))}")
 
     def init_repo(self):
         if not self.backup_enabled:
@@ -42,30 +89,18 @@ class GitHubBackup:
         git_dir = os.path.join(self.data_dir, ".git")
         if not os.path.exists(git_dir):
             try:
-                subprocess.run(
-                    ["git", "init"],
-                    cwd=self.data_dir,
-                    capture_output=True,
-                    check=True
+                self._safe_run("git", "init", cwd=self.data_dir, check=True)
+                self._safe_run(
+                    "git", "remote", "add", "origin", self.repo_url,
+                    cwd=self.data_dir, check=True,
                 )
-                auth_url = self._get_auth_url()
-                subprocess.run(
-                    ["git", "remote", "add", "origin", auth_url],
-                    cwd=self.data_dir,
-                    capture_output=True,
-                    check=True
+                self._safe_run(
+                    "git", "config", "user.name", "Nova Bot",
+                    cwd=self.data_dir, check=True,
                 )
-                subprocess.run(
-                    ["git", "config", "user.name", "Nova Bot"],
-                    cwd=self.data_dir,
-                    capture_output=True,
-                    check=True
-                )
-                subprocess.run(
-                    ["git", "config", "user.email", "nova-bot@discord"],
-                    cwd=self.data_dir,
-                    capture_output=True,
-                    check=True
+                self._safe_run(
+                    "git", "config", "user.email", "nova-bot@discord",
+                    cwd=self.data_dir, check=True,
                 )
 
                 gitignore_path = os.path.join(self.data_dir, ".gitignore")
@@ -73,190 +108,168 @@ class GitHubBackup:
                     with open(gitignore_path, "w") as f:
                         f.write("*.pyc\n__pycache__/\n.env\n*.log\n")
 
-                subprocess.run(
-                    ["git", "add", "-A"],
-                    cwd=self.data_dir,
-                    capture_output=True,
-                    check=True
+                self._safe_run("git", "add", "-A", cwd=self.data_dir, check=True)
+                self._safe_run(
+                    "git", "commit", "-m", "Initial commit - Nova Bot Backup",
+                    cwd=self.data_dir, check=True,
                 )
-                subprocess.run(
-                    ["git", "commit", "-m", "Initial commit - Nova Bot Backup"],
-                    cwd=self.data_dir,
-                    capture_output=True,
-                    check=True
+
+                branch_result = self._safe_run(
+                    "git", "rev-parse", "--abbrev-ref", "HEAD",
+                    cwd=self.data_dir, check=True,
                 )
-                subprocess.run(
-                    ["git", "branch", "-M", "main"],
-                    cwd=self.data_dir,
-                    capture_output=True,
-                    check=True
-                )
-                auth_url = self._get_auth_url()
-                subprocess.run(
-                    ["git", "push", "-u", "origin", "main"],
-                    cwd=self.data_dir,
-                    capture_output=True,
-                    check=True,
-                    env={**os.environ, "GIT_ASKPASS": "echo"}
+                current_branch = branch_result.stdout.strip()
+                if current_branch != "main":
+                    self._safe_run(
+                        "git", "branch", "-m", "main",
+                        cwd=self.data_dir, check=True,
+                    )
+
+                self._apply_token_to_remote()
+                self._safe_run(
+                    "git", "push", "-u", "origin", "main",
+                    cwd=self.data_dir, check=True,
                 )
 
                 logger.info("Git repo initialized for backup")
                 return True
             except Exception as e:
-                logger.error(f"Failed to init git repo: {e}")
+                logger.error(f"Failed to init git repo: {self._redact(str(e))}")
                 return False
         else:
             try:
-                auth_url = self._get_auth_url()
-                subprocess.run(
-                    ["git", "remote", "set-url", "origin", auth_url],
-                    cwd=self.data_dir,
-                    capture_output=True,
-                    check=True
+                self._safe_run(
+                    "git", "remote", "set-url", "origin", self.repo_url,
+                    cwd=self.data_dir, check=True,
                 )
+                self._apply_token_to_remote()
 
-                result = subprocess.run(
-                    ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                    cwd=self.data_dir,
-                    capture_output=True,
-                    text=True
+                branch_result = self._safe_run(
+                    "git", "rev-parse", "--abbrev-ref", "HEAD",
+                    cwd=self.data_dir, check=True,
                 )
-                current_branch = result.stdout.strip()
+                current_branch = branch_result.stdout.strip()
 
-                log_result = subprocess.run(
-                    ["git", "log", "--oneline", "-1"],
+                log_result = self._safe_run(
+                    "git", "log", "--oneline", "-1",
                     cwd=self.data_dir,
-                    capture_output=True,
-                    text=True
                 )
                 has_commits = log_result.returncode == 0 and log_result.stdout.strip()
 
                 if not has_commits:
                     logger.info("No commits found, creating initial commit")
-                    subprocess.run(
-                        ["git", "add", "-A"],
-                        cwd=self.data_dir,
-                        capture_output=True,
-                        check=True
+                    self._safe_run(
+                        "git", "add", "-A", cwd=self.data_dir, check=True,
                     )
-                    subprocess.run(
-                        ["git", "commit", "-m", "Initial commit - Nova Bot Backup"],
-                        cwd=self.data_dir,
-                        capture_output=True,
-                        check=True
+                    self._safe_run(
+                        "git", "commit", "-m", "Initial commit - Nova Bot Backup",
+                        cwd=self.data_dir, check=True,
                     )
-                    subprocess.run(
-                        ["git", "branch", "-M", "main"],
-                        cwd=self.data_dir,
-                        capture_output=True,
-                        check=True
-                    )
-                    auth_url = self._get_auth_url()
-                    subprocess.run(
-                        ["git", "push", "-u", "origin", "main"],
-                        cwd=self.data_dir,
-                        capture_output=True,
-                        check=True,
-                        env={**os.environ, "GIT_ASKPASS": "echo"}
+                    if current_branch != "main":
+                        self._safe_run(
+                            "git", "branch", "-m", "main",
+                            cwd=self.data_dir, check=True,
+                        )
+                    self._safe_run(
+                        "git", "push", "-u", "origin", "main",
+                        cwd=self.data_dir, check=True,
                     )
                     logger.info("Initial commit created and pushed")
                 elif current_branch != "main":
                     logger.info(f"Renaming branch from {current_branch} to main")
-                    subprocess.run(
-                        ["git", "branch", "-M", "main"],
-                        cwd=self.data_dir,
-                        capture_output=True,
-                        check=True
+                    self._safe_run(
+                        "git", "branch", "-m", "main",
+                        cwd=self.data_dir, check=True,
                     )
-                    auth_url = self._get_auth_url()
-                    subprocess.run(
-                        ["git", "push", "-u", "origin", "main"],
-                        cwd=self.data_dir,
-                        capture_output=True,
-                        check=True,
-                        env={**os.environ, "GIT_ASKPASS": "echo"}
+                    self._safe_run(
+                        "git", "push", "-u", "origin", "main",
+                        cwd=self.data_dir, check=True,
                     )
 
             except Exception as e:
-                logger.error(f"Failed to update remote URL: {e}")
+                logger.error(f"Failed to update remote URL: {self._redact(str(e))}")
         return True
 
     def should_backup(self):
         if not self.backup_enabled:
             return False
-
-        if self.message_counter >= self.backup_interval_messages:
-            return True
-
-        if time.time() - self.last_backup_time >= self.backup_interval_time:
-            return True
-
+        with self._counter_lock:
+            if self.message_counter >= self.backup_interval_messages:
+                return True
+            if time.time() - self.last_backup_time >= self.backup_interval_time:
+                return True
         return False
 
-    def backup(self, reason="scheduled"):
+    async def backup(self, reason="scheduled"):
+        import asyncio
         if not self.backup_enabled:
             return False
+        if self._backup_lock.locked():
+            logger.debug(f"Backup already in progress, skipping: {reason}")
+            return False
+        return await asyncio.to_thread(self._backup_sync, reason)
 
-        try:
-            subprocess.run(
-                ["git", "add", "-A"],
-                cwd=self.data_dir,
-                capture_output=True,
-                check=True
-            )
+    def _backup_sync(self, reason="scheduled"):
+        with self._backup_lock:
+            try:
+                self._safe_run(
+                    "git", "add", "-A",
+                    cwd=self.data_dir, check=True,
+                )
 
-            result = subprocess.run(
-                ["git", "status", "--porcelain"],
-                cwd=self.data_dir,
-                capture_output=True,
-                text=True
-            )
-            if not result.stdout.strip():
-                logger.info("No changes to backup")
-                self.last_backup_time = time.time()
-                self.message_counter = 0
+                result = self._safe_run(
+                    "git", "status", "--porcelain",
+                    cwd=self.data_dir,
+                )
+                if not result.stdout.strip():
+                    logger.info("No changes to backup")
+                    self._reset_counters()
+                    return True
+
+                commit_msg = f"Nova Bot Backup: {reason} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                self._safe_run(
+                    "git", "commit", "-m", commit_msg,
+                    cwd=self.data_dir, check=True,
+                )
+
+                self._safe_run(
+                    "git", "push", "origin", "main",
+                    cwd=self.data_dir, check=True,
+                )
+
+                logger.info(f"Backup successful: {reason}")
+                self._reset_counters()
+                self._schedule_audit("success", f"Auto backup: {reason}")
                 return True
 
-            commit_msg = f"Nova Bot Backup: {reason} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-            subprocess.run(
-                ["git", "commit", "-m", commit_msg],
-                cwd=self.data_dir,
-                capture_output=True,
-                check=True
-            )
+            except subprocess.CalledProcessError as e:
+                logger.error(f"Backup failed: {self._redact(e.stderr or '')}")
+                return False
+            except Exception as e:
+                logger.error(f"Backup error: {self._redact(str(e))}")
+                return False
 
-            auth_url = self._get_auth_url()
-            subprocess.run(
-                ["git", "push", "origin", "main"],
-                cwd=self.data_dir,
-                capture_output=True,
-                check=True,
-                env={**os.environ, "GIT_ASKPASS": "echo"}
-            )
-
-            logger.info(f"Backup successful: {reason}")
+    def _reset_counters(self):
+        with self._counter_lock:
             self.last_backup_time = time.time()
             self.message_counter = 0
-            if self._audit_logger:
-                import asyncio
-                try:
-                    loop = asyncio.get_running_loop()
-                    loop.create_task(self._audit_logger.log_backup("success", f"Auto backup: {reason}"))
-                except RuntimeError:
-                    pass
-            return True
 
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Backup failed: {e.stderr}")
-            return False
-        except Exception as e:
-            logger.error(f"Backup error: {e}")
-            return False
+    def _schedule_audit(self, status, message):
+        if not self._audit_logger:
+            return
+        import asyncio
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(self._audit_logger.log_backup(status, message))
+        except RuntimeError:
+            pass
 
     def increment_counter(self):
-        self.message_counter += 1
-        if self.should_backup():
-            return self.backup("message_threshold")
+        with self._counter_lock:
+            self.message_counter += 1
+            if (self.message_counter >= self.backup_interval_messages
+                    or time.time() - self.last_backup_time >= self.backup_interval_time):
+                return True
         return False
 
     def get_status(self):

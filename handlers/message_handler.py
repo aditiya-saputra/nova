@@ -197,6 +197,7 @@ class MessageHandler:
             )
 
         if self.github_backup.increment_counter():
+            await self.github_backup.backup("message_threshold")
             await self.audit_logger.log_backup("success", "Auto backup triggered")
 
         await self.bot.process_commands(message)
