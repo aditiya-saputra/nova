@@ -13,9 +13,9 @@ class MessageRouter:
         if message.author.bot:
             return None
 
-        if hasattr(message, 'interaction_metadata') and message.interaction_metadata:
-            return "slash_command"
-        elif hasattr(message, 'interaction') and message.interaction:
+        # discord.py 2.7: message.interaction deprecated — pakai interaction_metadata saja.
+        # Jangan akses message.interaction (memicu DeprecationWarning tiap pesan).
+        if getattr(message, "interaction_metadata", None):
             return "slash_command"
 
         content = message.content or ""

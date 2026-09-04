@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [1.6.1] - 2026-09-04
+
+### 🐛 Fixed (Discord + Gemini warnings dari server log)
+- **DeprecationWarning `message.interaction` (`core/message_router.py`)**: hapus cek `hasattr(message,'interaction')` yang memicu warning tiap pesan di discord.py 2.7 — tersisa `getattr(message,"interaction_metadata",None)` saja.
+- **AFC warning (`services/gemini_client.py:generate_with_tools`)**: selalu via `chats.create(history or [])` + `send_message`, tidak lagi `models.generate_content` saat tanpa history (sesuai anjuran SDK).
+- **Non-text warning (`_extract_response_text`)**: inspeksi `parts` dulu sebelum sentuh `response.text`; teks digabung hanya bila tidak ada `function_call`.
+- **Balasan repr internal (`faa: baca readme` → `parts=[Part(text='', thoughtsignature=...)]`)**: thinking-only (teks kosong + thoughtsignature) kini return `""`, bukan `str(content)`. Guard di `handlers/message_handler.py`: respon kosong → fallback tsundere agar tidak 400 empty message Discord.
+
+---
+
 ## [1.6.0] - 2026-09-04
 
 ### ⚡ Performance (asyncio fast-response)

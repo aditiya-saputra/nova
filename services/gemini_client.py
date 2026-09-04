@@ -52,22 +52,35 @@ class GeminiClient:
         return config
 
     def _extract_response_text(self, response):
+        # Jangan akses response.text bila ada function_call (SDK warning:
+        # "non-text parts in the response"). Inspeksi parts dulu.
+        # Jangan pernah return repr internal (Part(...)/thoughtsignature) ke user.
         try:
-            if hasattr(response, 'text') and response.text:
-                return str(response.text)
-            if response.candidates:
-                candidate = response.candidates[0]
-                if hasattr(candidate, 'content'):
-                    content = candidate.content
-                    if hasattr(content, 'parts'):
-                        for part in content.parts:
-                            if hasattr(part, 'text') and part.text:
-                                return str(part.text)
-                    if hasattr(content, 'role'):
-                        return str(content)
+            candidates = getattr(response, "candidates", None)
+            if candidates:
+                parts = getattr(getattr(candidates[0], "content", None), "parts", None) or []
+                texts = [p.text for p in parts if getattr(p, "text", None)]
+                # Buang string kosong / whitespace-only (kasus thoughtsignature saja).
+                texts = [t for t in texts if t and t.strip()]
+                has_func = any(getattr(p, "function_call", None) for p in parts)
+                if texts and not has_func:
+                    return str(texts[0])
+                if texts:
+                    return str("\n".join(texts))
+                if has_func:
+                    return ""
+                # Tidak ada teks & bukan tool call (mis. thinking-only) → string kosong,
+                # JANGAN str(content) karena itu repr internal Part(thoughtsignature=...).
+                return ""
+            try:
+                txt = getattr(response, "text", None)
+            except Exception:
+                txt = None
+            if txt:
+                return str(txt)
         except Exception as e:
             logger.error(f"Error extracting response text: {e}")
-        return str(response)
+        return ""
 
     async def _run_with_fallback(self, fn, label_prefix=""):
         last_error = None
@@ -152,19 +165,14 @@ class GeminiClient:
         async def _call(api_key):
             client = self._get_client(api_key)
             logger.info(f"Generating with tools: {self.model_name}")
-            if history:
-                chat = client.aio.chats.create(
-                    model=self.model_name,
-                    history=history,
-                    config=config
-                )
-                response = await chat.send_message(prompt)
-            else:
-                response = await client.aio.models.generate_content(
-                    model=self.model_name,
-                    contents=prompt,
-                    config=config
-                )
+            # SDK anjurkan AFC via Chat.send_message, bukan Models.generate_content.
+            # Selalu pakai chat (history kosong bila tidak ada) agar tidak warning.
+            chat = client.aio.chats.create(
+                model=self.model_name,
+                history=history or [],
+                config=config
+            )
+            response = await chat.send_message(prompt)
             response_text = self._extract_response_text(response)
             if response.candidates and response.candidates[0].content.parts:
                 for part in response.candidates[0].content.parts:

@@ -207,6 +207,12 @@ class MessageHandler:
                 response = f"Error: {str(e)}"
                 await self.audit_logger.log_error("message_processing", str(e), {"channel_id": message.channel.id})
 
+            # Guard: Gemini thinking-only (text kosong + thoughtsignature) → jangan
+            # kirim string kosong / repr internal ke Discord (400 empty message).
+            if not (response or "").strip():
+                logger.warning("Gemini returned empty text (thinking-only?), using fallback")
+                response = "Hmph! Aku sempat blank... coba tanya lagi dengan lebih jelas, baka! (￣ω￣;)"
+
         latency = time.time() - start_time
         rich.response_stats(len(response.split()), latency)
 
