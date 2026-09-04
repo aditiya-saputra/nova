@@ -19,6 +19,8 @@ class GeminiClient:
         self.model_name = settings.GEMINI_MODEL
         self.fallback_models = settings.GEMINI_FALLBACK_MODELS
         self.model_chain = [self.model_name] + self.fallback_models
+        # #3: cache genai.Client per API key — jangan bikin baru tiap call.
+        self._clients: dict[str, object] = {}
 
     def _is_not_found_error(self, e):
         code = getattr(e, "code", None) or getattr(e, "status_code", None)
@@ -33,7 +35,12 @@ class GeminiClient:
         return key
 
     def _get_client(self, api_key):
-        return genai.Client(api_key=api_key)
+        # #3: reuse client per key (genai.Client menyimpan httpx connection pool).
+        client = self._clients.get(api_key)
+        if client is None:
+            client = genai.Client(api_key=api_key)
+            self._clients[api_key] = client
+        return client
 
     def _build_config(self, system_instruction=None):
         config = types.GenerateContentConfig(

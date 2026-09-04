@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [1.6.0] - 2026-09-04
+
+### ⚡ Performance (asyncio fast-response)
+- **#1 Paralel I/O (`handlers/message_handler.py`)**: `attachments.analyze` + `_retrieve_facts` + `check_and_compact` kini `asyncio.gather` dalam 1x `typing()` — hemat 1x RTT.
+- **#2 Background non-kritis**: helper `_spawn`/`_bg_await` fire-and-forget dengan log error. `log tool_call/tool_result` tidak block `execute`/`synthesize`. Urutan dibalik: reply dulu, baru `_spawn(log_response)`, `_spawn(rag_extract)`, `_spawn(_backup_and_log)`. `handle()` return tanpa nunggu Groq extract / git push.
+- **#3 Reuse koneksi**: `GeminiClient._clients` cache `genai.Client` per API key (`services/gemini_client.py`); `BrowserlessClient._get_session/aclose` shared `ClientSession` (`limit=20`, DNS cache 300s) untuk `fetch_content`/`fetch_image`; `AttachmentProcessor` shared session (`limit=10`) + `aclose`. Semua ditutup di `main.py` finally.
+- **#4 Non-blocking CPU/IO**: `TokenCounter._encode_cached` `@lru_cache(2048)` (`services/token_counter.py`); `HistoryStore.aappend/aappend_message` via `asyncio.to_thread` (`memory/history_store.py`) dipakai di `message_handler` + `/ask`.
+- **#5 Timeout + paralel gambar**: Gemini `generate_with_tools`/`synthesize`/`generate` dibungkus `asyncio.wait_for(timeout=30)` (`handlers/message_handler.py`, `cogs/slash_commands.py`); `AttachmentProcessor.analyze` batasi `MAX_IMAGES_PER_MESSAGE=3` + `gather` download+VLM paralel.
+- **Token-count restart fix**: `SessionManager.get_token_count/get_token_usage` kini `hydrate_from_disk` dulu (`memory/session_manager.py`) — cek compaction pertama setelah restart akurat.
+
+### 🧹 Housekeeping
+- Hapus `__pycache__`/`*.pyc` + 3 log 0-byte (`data/logs/bot_2026_08_30.log`, `bot_2026_09_02.log`, `bot_2026_09_04.log`). `secrets/*` dipertahankan sesuai pilihan user.
+
+---
+
 ## [1.5.0] - 2026-09-04
 
 ### ✨ Added

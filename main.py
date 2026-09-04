@@ -127,6 +127,18 @@ async def main():
                 await groq.aclose()
         except Exception:
             pass
+        # #3: tutup shared aiohttp sessions agar tidak warning unclosed.
+        try:
+            if hasattr(browserless, "aclose"):
+                await browserless.aclose()
+        except Exception:
+            pass
+        try:
+            att = getattr(getattr(bot, "message_handler", None), "attachments", None)
+            if att is not None and hasattr(att, "aclose"):
+                await att.aclose()
+        except Exception:
+            pass
         if not bot.is_closed():
             await bot.close()
 

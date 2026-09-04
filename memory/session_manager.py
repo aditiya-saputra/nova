@@ -61,9 +61,11 @@ class SessionManager:
         ]
 
     def get_token_count(self, key):
+        self.hydrate_from_disk(key)
         return self.token_counts[key]
 
     def get_token_usage(self, key):
+        self.hydrate_from_disk(key)
         return self.token_counts[key] / self.settings.GEMINI_CONTEXT_LIMIT
 
     def replace_history(self, key, summary, tail_keep=4):

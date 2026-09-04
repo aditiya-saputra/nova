@@ -64,7 +64,7 @@ class SlashCommands(commands.Cog):
 
             system_prompt = context_builder.build_system_prompt(metadata, relevant_facts)
             session_manager.add_message(channel_key, "user", question)
-            history_store.append_message(channel_key, user_id, "user", question)
+            await history_store.aappend_message(channel_key, user_id, "user", question)
 
             prompt = f"{system_prompt}\n\nUser: {question}"
             history = session_manager.get_history(channel_key)[:-1]
@@ -73,13 +73,14 @@ class SlashCommands(commands.Cog):
                 for m in history[-20:]
                 if m["role"] in ("user", "model", "system")
             ]
+            import asyncio as _asyncio
             if history_payload:
-                response = await gemini.generate(prompt, history=history_payload)
+                response = await _asyncio.wait_for(gemini.generate(prompt, history=history_payload), timeout=30)
             else:
-                response = await gemini.generate(prompt)
+                response = await _asyncio.wait_for(gemini.generate(prompt), timeout=30)
 
             session_manager.add_message(channel_key, "assistant", response)
-            history_store.append_message(channel_key, user_id, "assistant", response)
+            await history_store.aappend_message(channel_key, user_id, "assistant", response)
 
             await interaction.followup.send(response)
 

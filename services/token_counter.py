@@ -1,4 +1,5 @@
 import tiktoken
+from functools import lru_cache
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -18,14 +19,24 @@ class TokenCounter:
         except Exception:
             self.encoding = None
 
+    @lru_cache(maxsize=2048)
+    def _encode_cached(self, text: str) -> int:
+        # #4: cache hit untuk pesan berulang (hydrate, retry) — hemat CPU encode.
+        return len(self.encoding.encode(text))
+
     def count_tokens(self, text):
         if not self.encoding:
-            return len(text) // 4
-
+            return len(text or "") // 4
+        if not text:
+            return 0
         try:
-            return len(self.encoding.encode(text))
+            # lru_cache pada method (self ikut jadi key — aman 1 instance global).
+            return self._encode_cached(text)
         except Exception:
-            return len(text) // 4
+            try:
+                return len(self.encoding.encode(text))
+            except Exception:
+                return len(text) // 4
 
     def count_messages(self, messages):
         total = 0

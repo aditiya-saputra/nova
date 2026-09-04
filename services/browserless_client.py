@@ -70,6 +70,23 @@ class BrowserlessClient:
         self.enabled = bool(self.api_url and self.api_token)
         self.max_content_length = 15000
         self.timeout = 30
+        # #3: shared aiohttp session (connection pool reuse, hemat TLS handshake).
+        self._session = None
+
+    async def _get_session(self):
+        import aiohttp
+        if self._session is None or self._session.closed:
+            connector = aiohttp.TCPConnector(limit=20, limit_per_host=6, ttl_dns_cache=300)
+            self._session = aiohttp.ClientSession(connector=connector)
+        return self._session
+
+    async def aclose(self):
+        if self._session is not None:
+            try:
+                await self._session.close()
+            except Exception:
+                pass
+            self._session = None
 
     def _is_safe_url(self, url):
         """Sync literal check: scheme, IP literal, exact/suffix/octet rules, single-label.
@@ -228,6 +245,7 @@ class BrowserlessClient:
 
         try:
             import aiohttp
+            session = await self._get_session()
 
             payload = {
                 "url": url,
@@ -245,58 +263,57 @@ class BrowserlessClient:
                 "Content-Type": "application/json"
             }
 
-            async with aiohttp.ClientSession() as session:
-                if mode == "pdf":
-                    endpoint = f"{self.api_url}/pdf"
-                elif mode == "screenshot":
-                    endpoint = f"{self.api_url}/screenshot"
+            if mode == "pdf":
+                endpoint = f"{self.api_url}/pdf"
+            elif mode == "screenshot":
+                endpoint = f"{self.api_url}/screenshot"
+            else:
+                endpoint = f"{self.api_url}/content"
+
+            async with session.post(
+                endpoint,
+                json=payload,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=self.timeout)
+            ) as resp:
+                if resp.status != 200:
+                    error_text = await resp.text()
+                    transient = resp.status in (429, 500, 502, 503, 504)
+                    return {
+                        "error": f"Browserless error: {resp.status} - {error_text}",
+                        "safe": False,
+                        "transient": transient,
+                    }
+
+                if mode in ("pdf", "screenshot"):
+                    data = await resp.read()
+                    return {
+                        "success": True,
+                        "type": mode,
+                        "data": data,
+                        "content_type": "application/pdf" if mode == "pdf" else "image/png",
+                        "safe": True
+                    }
                 else:
-                    endpoint = f"{self.api_url}/content"
+                    data = await resp.json()
+                    content = data.get("content", "")
+                    title = data.get("title", "")
+                    link = data.get("url", url)
 
-                async with session.post(
-                    endpoint,
-                    json=payload,
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=self.timeout)
-                ) as resp:
-                    if resp.status != 200:
-                        error_text = await resp.text()
-                        transient = resp.status in (429, 500, 502, 503, 504)
-                        return {
-                            "error": f"Browserless error: {resp.status} - {error_text}",
-                            "safe": False,
-                            "transient": transient,
-                        }
+                    # Sanitize content
+                    sanitized = self._sanitize_content(content)
+                    clean_text = self._extract_text_from_markdown(sanitized)
 
-                    if mode in ("pdf", "screenshot"):
-                        data = await resp.read()
-                        return {
-                            "success": True,
-                            "type": mode,
-                            "data": data,
-                            "content_type": "application/pdf" if mode == "pdf" else "image/png",
-                            "safe": True
-                        }
-                    else:
-                        data = await resp.json()
-                        content = data.get("content", "")
-                        title = data.get("title", "")
-                        link = data.get("url", url)
-
-                        # Sanitize content
-                        sanitized = self._sanitize_content(content)
-                        clean_text = self._extract_text_from_markdown(sanitized)
-
-                        return {
-                            "success": True,
-                            "type": "text",
-                            "title": title,
-                            "url": link,
-                            "content": clean_text,
-                            "original_length": len(content),
-                            "cleaned_length": len(clean_text),
-                            "safe": True
-                        }
+                    return {
+                        "success": True,
+                        "type": "text",
+                        "title": title,
+                        "url": link,
+                        "content": clean_text,
+                        "original_length": len(content),
+                        "cleaned_length": len(clean_text),
+                        "safe": True
+                    }
 
         except Exception as e:
             logger.error(f"Browserless fetch error: {e}")
@@ -325,52 +342,50 @@ class BrowserlessClient:
         try:
             import aiohttp
 
-            # Satu session untuk semua hop (Context7: reuse ClientSession).
-            # Auth header hanya untuk Browserless API; untuk GET image langsung
-            # jangan kirim Authorization ke host arbitrary, dan strip saat
-            # cross-origin redirect (per aiohttp 3.14.3 behavior).
+            # Shared session (Context7: reuse ClientSession).
+            # GET image langsung tanpa Authorization (itu hanya untuk Browserless API).
             current_url = url
             origin_host = (urlparse(url).hostname or "").lower()
-            async with aiohttp.ClientSession() as session:
-                for _ in range(5):
-                    async with session.get(
-                        current_url,
-                        timeout=aiohttp.ClientTimeout(total=30),
-                        allow_redirects=False
-                    ) as resp:
-                        if resp.status in (301, 302, 303, 307, 308):
-                            location = resp.headers.get("Location", "") or resp.headers.get("URI", "")
-                            if not location:
-                                return {"error": "Redirect without Location", "safe": False}
-                            # Selesaikan redirect relatif terhadap URL saat ini.
-                            next_url = urljoin(current_url, location)
-                            safe, reason = await self._is_safe_url_async(next_url)
-                            if not safe:
-                                return {"error": f"Redirect blocked: {reason}", "safe": False}
-                            next_host = (urlparse(next_url).hostname or "").lower()
-                            if next_host != origin_host:
-                                # Cross-origin: jangan bawa kredensial apapun.
-                                origin_host = next_host
-                            current_url = next_url
-                            continue
-                        if resp.status != 200:
-                            return {"error": f"HTTP {resp.status}", "safe": False}
+            session = await self._get_session()
+            for _ in range(5):
+                async with session.get(
+                    current_url,
+                    timeout=aiohttp.ClientTimeout(total=30),
+                    allow_redirects=False
+                ) as resp:
+                    if resp.status in (301, 302, 303, 307, 308):
+                        location = resp.headers.get("Location", "") or resp.headers.get("URI", "")
+                        if not location:
+                            return {"error": "Redirect without Location", "safe": False}
+                        # Selesaikan redirect relatif terhadap URL saat ini.
+                        next_url = urljoin(current_url, location)
+                        safe, reason = await self._is_safe_url_async(next_url)
+                        if not safe:
+                            return {"error": f"Redirect blocked: {reason}", "safe": False}
+                        next_host = (urlparse(next_url).hostname or "").lower()
+                        if next_host != origin_host:
+                            # Cross-origin: jangan bawa kredensial apapun.
+                            origin_host = next_host
+                        current_url = next_url
+                        continue
+                    if resp.status != 200:
+                        return {"error": f"HTTP {resp.status}", "safe": False}
 
-                        content_type = resp.content_type or ""
-                        if not content_type.startswith("image/"):
-                            return {"error": f"Not an image: {content_type}", "safe": False}
+                    content_type = resp.content_type or ""
+                    if not content_type.startswith("image/"):
+                        return {"error": f"Not an image: {content_type}", "safe": False}
 
-                        data = await resp.read()
-                        if len(data) > 20 * 1024 * 1024:
-                            return {"error": "Image too large (max 20MB)", "safe": False}
+                    data = await resp.read()
+                    if len(data) > 20 * 1024 * 1024:
+                        return {"error": "Image too large (max 20MB)", "safe": False}
 
-                        return {
-                            "success": True,
-                            "mime_type": content_type,
-                            "data": data,
-                            "size": len(data),
-                            "safe": True
-                        }
+                    return {
+                        "success": True,
+                        "mime_type": content_type,
+                        "data": data,
+                        "size": len(data),
+                        "safe": True
+                    }
             return {"error": "Too many redirects", "safe": False}
 
         except Exception as e:

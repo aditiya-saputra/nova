@@ -1,3 +1,4 @@
+import asyncio
 import time
 import re
 import discord
@@ -11,6 +12,23 @@ logger = get_logger(__name__)
 
 URL_PATTERN = re.compile(r'https?://[^\s<>"{}|\\^`\[\]]+')
 HISTORY_BUDGET = 20
+
+
+async def _bg_await(coro, label="bg"):
+    """Fire-and-forget dengan log error — untuk audit/fact-extract/backup."""
+    try:
+        await coro
+    except Exception as e:
+        logger.error(f"Background {label} error: {e}")
+
+
+def _spawn(coro, label="bg"):
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_bg_await(coro, label))
+    except RuntimeError:
+        # Tidak ada loop berjalan (mis. saat shutdown/test) — skip aman.
+        logger.error(f"No running loop for background {label}")
 
 
 def _to_gemini_history(session_history):
@@ -115,15 +133,17 @@ class MessageHandler:
         response = ""
 
         async with message.channel.typing():
-            image_analyses = await self.attachments.analyze(
-                image_attachments, content or "Deskripsikan gambar ini secara detail."
+            # #1: Paralelkan I/O independen (VLM + RAG + compaction) via gather.
+            image_analyses, relevant_facts, _ = await asyncio.gather(
+                self.attachments.analyze(
+                    image_attachments, content or "Deskripsikan gambar ini secara detail."
+                ),
+                self._retrieve_facts(content, message.channel.id),
+                self.compaction_engine.check_and_compact(channel_key, user_id),
             )
 
-            relevant_facts = await self._retrieve_facts(content, message.channel.id)
-            await self.compaction_engine.check_and_compact(channel_key, user_id)
-
             self.session_manager.add_message(channel_key, "user", content)
-            self.history_store.append_message(channel_key, user_id, "user", content)
+            await self.history_store.aappend_message(channel_key, user_id, "user", content)
 
             try:
                 system_prompt = self.context_builder.build_system_prompt(metadata, relevant_facts)
@@ -131,24 +151,29 @@ class MessageHandler:
                 tools = self.tool_executor.get_tools_for_gemini()
                 history = _to_gemini_history(self.session_manager.get_history(channel_key)[:-1])
 
-                gemini_response = await self.gemini.generate_with_tools(
-                    final_prompt, tools,
-                    system_instruction=system_prompt,
-                    history=history or None,
-                )
+                # #5: timeout 30s — jangan tunggu Gemini gantung; fallback error cepat.
+                try:
+                    gemini_response = await asyncio.wait_for(self.gemini.generate_with_tools(
+                        final_prompt, tools,
+                        system_instruction=system_prompt,
+                        history=history or None,
+                    ), timeout=30)
+                except asyncio.TimeoutError:
+                    raise TimeoutError("Gemini generate_with_tools timeout (30s)")
 
                 if gemini_response.get("type") == "tool_call":
                     tool_name = gemini_response.get("tool")
                     tool_args = gemini_response.get("args", {})
                     logger.info(f"Gemini selected tool: {tool_name}")
 
-                    await self.audit_logger.log("tool_call", {
+                    # #2: audit tool_call jangan block eksekusi tool.
+                    _spawn(self.audit_logger.log("tool_call", {
                         "user_id": user_id,
                         "user_name": message.author.display_name,
                         "channel_id": message.channel.id,
                         "tool_name": tool_name,
                         "tool_args": tool_args,
-                    })
+                    }), "tool_call")
 
                     tool_result = await self.tool_executor.execute(
                         tool_name, tool_args,
@@ -156,22 +181,26 @@ class MessageHandler:
                         user_id=user_id,
                     )
 
-                    await self.audit_logger.log("tool_result", {
+                    # #2: audit tool_result jangan block synthesize.
+                    _spawn(self.audit_logger.log("tool_result", {
                         "user_id": user_id,
                         "channel_id": message.channel.id,
                         "tool_name": tool_name,
                         "result_length": len(str(tool_result)),
                         "success": not str(tool_result).startswith("Error"),
-                    })
+                    }), "tool_result")
 
-                    response = await self.gemini.synthesize_with_tool_result(
-                        final_prompt, tool_result, system_instruction=system_prompt
-                    )
+                    try:
+                        response = await asyncio.wait_for(self.gemini.synthesize_with_tool_result(
+                            final_prompt, tool_result, system_instruction=system_prompt
+                        ), timeout=30)
+                    except asyncio.TimeoutError:
+                        raise TimeoutError("Gemini synthesize timeout (30s)")
                 else:
                     response = gemini_response.get("text", "")
 
                 self.session_manager.add_message(channel_key, "assistant", response)
-                self.history_store.append_message(channel_key, user_id, "assistant", response)
+                await self.history_store.aappend_message(channel_key, user_id, "assistant", response)
 
             except Exception as e:
                 logger.error(f"Error processing message: {e}")
@@ -181,32 +210,47 @@ class MessageHandler:
         latency = time.time() - start_time
         rich.response_stats(len(response.split()), latency)
 
-        await self.audit_logger.log_response(
-            message.channel.id, len(response), latency, len(response.split())
-        )
-
+        # Reply dulu agar user tidak nunggu audit/RAG/backup.
         if self.settings.BOT_REPLY_MENTION:
             await message.reply(response, mention_author=True)
         else:
             await message.channel.send(response)
 
-        presence = self.bot.get_cog("DynamicPresence") if hasattr(self.bot, "get_cog") else None
-        if presence:
-            presence.add_message()
-            presence.add_tokens(len(response.split()))
+        # #2: non-kritis jadi background (tidak block return handle).
+        _spawn(self.audit_logger.log_response(
+            message.channel.id, len(response), latency, len(response.split())
+        ), "log_response")
+
+        try:
+            presence = self.bot.get_cog("DynamicPresence") if hasattr(self.bot, "get_cog") else None
+            if presence:
+                presence.add_message()
+                presence.add_tokens(len(response.split()))
+        except Exception:
+            pass
 
         if response and not response.startswith("Error:"):
-            extract_prompt = self.context_builder.build_rag_extract_prompt(content, response, metadata)
-            await self.fact_extractor.extract_and_save(
-                extract_prompt, message.channel.id, user_id, message.id
-            )
+            try:
+                extract_prompt = self.context_builder.build_rag_extract_prompt(content, response, metadata)
+                _spawn(self.fact_extractor.extract_and_save(
+                    extract_prompt, message.channel.id, user_id, message.id
+                ), "rag_extract")
+            except Exception as e:
+                logger.error(f"RAG extract spawn error: {e}")
 
-        if self.github_backup.increment_counter():
-            await self.github_backup.backup("message_threshold")
-            await self.audit_logger.log_backup("success", "Auto backup triggered")
+        try:
+            if self.github_backup.increment_counter():
+                _spawn(self._backup_and_log(), "github_backup")
+        except Exception as e:
+            logger.error(f"Backup spawn error: {e}")
 
         # NOTE: process_commands dipanggil di main.py on_message (finally),
         # bukan di sini, agar pesan command tetap diproses walau AI skip.
+
+    async def _backup_and_log(self):
+        ok = await self.github_backup.backup("message_threshold")
+        if ok:
+            await self.audit_logger.log_backup("success", "Auto backup triggered")
 
     async def _retrieve_facts(self, query, channel_id):
         # Single source of truth via FactExtractor helper (hindari 3x duplikasi).

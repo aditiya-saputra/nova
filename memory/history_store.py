@@ -1,3 +1,4 @@
+import asyncio
 import json
 import threading
 from pathlib import Path
@@ -38,6 +39,10 @@ class HistoryStore:
             with open(path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry) + "\n")
 
+    async def aappend(self, key, entry):
+        # #4: tulis file di thread agar event loop tidak ke-block.
+        await asyncio.to_thread(self.append, key, entry)
+
     def append_message(self, key, user_id, role, content):
         entry = {
             "user_id": user_id,
@@ -46,6 +51,9 @@ class HistoryStore:
             "timestamp": __import__("time").time()
         }
         self.append(key, entry)
+
+    async def aappend_message(self, key, user_id, role, content):
+        await asyncio.to_thread(self.append_message, key, user_id, role, content)
 
     def append_compaction(self, key, user_id, summary):
         entry = {
