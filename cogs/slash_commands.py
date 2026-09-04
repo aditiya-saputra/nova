@@ -75,9 +75,9 @@ class SlashCommands(commands.Cog):
             ]
             import asyncio as _asyncio
             if history_payload:
-                response = await _asyncio.wait_for(gemini.generate(prompt, history=history_payload), timeout=30)
+                response = await _asyncio.wait_for(gemini.generate(prompt, history=history_payload), timeout=45)
             else:
-                response = await _asyncio.wait_for(gemini.generate(prompt), timeout=30)
+                response = await _asyncio.wait_for(gemini.generate(prompt), timeout=45)
 
             session_manager.add_message(channel_key, "assistant", response)
             await history_store.aappend_message(channel_key, user_id, "assistant", response)
@@ -118,7 +118,7 @@ class SlashCommands(commands.Cog):
 
         try:
             rag_store = self.bot.rag_store
-            nuggets = rag_store.get_all(interaction.channel_id)
+            nuggets = await rag_store.aget_all(interaction.channel_id)
 
             if not nuggets:
                 await interaction.followup.send("No memories found for this channel.")
@@ -203,7 +203,7 @@ class SlashCommands(commands.Cog):
 
         try:
             audit_logger = self.bot.audit_logger
-            logs = audit_logger.get_logs_by_type("message_deleted", limit=limit)
+            logs = await audit_logger.aget_logs_by_type("message_deleted", limit=limit)
 
             if not logs:
                 await interaction.followup.send("No deleted messages logged.")
@@ -247,9 +247,9 @@ class SlashCommands(commands.Cog):
             audit_logger = self.bot.audit_logger
 
             if event_type == "all":
-                logs = audit_logger.get_recent_logs(limit=limit)
+                logs = await audit_logger.aget_recent_logs(limit=limit)
             else:
-                logs = audit_logger.get_logs_by_type(event_type, limit=limit)
+                logs = await audit_logger.aget_logs_by_type(event_type, limit=limit)
 
             if not logs:
                 await interaction.followup.send("No audit logs found.")
@@ -549,14 +549,35 @@ class SlashCommands(commands.Cog):
 
         try:
             gemini = self.bot.gemini
-            browserless = self.bot.browserless
 
-            if not gemini or not browserless:
+            if not gemini:
                 await interaction.followup.send("Screenshot service not configured.", ephemeral=True)
                 return
 
-            result = await browserless.screenshot_page(url)
-            if not result.get("success"):
+            # Provider order sama seperti ToolExecutor (hyperbrowser → browserless).
+            mode = (getattr(getattr(self.bot, "settings", None), "FETCH_PROVIDER", "auto") or "auto").lower()
+            hb = getattr(self.bot, "hyperbrowser", None)
+            bl = getattr(self.bot, "browserless", None)
+            providers = []
+            if mode == "hyperbrowser":
+                providers = [p for p in (hb,) if p and getattr(p, "enabled", False)]
+            elif mode == "browserless":
+                providers = [p for p in (bl,) if p and getattr(p, "enabled", False)]
+            else:
+                if hb and getattr(hb, "enabled", False):
+                    providers.append(hb)
+                if bl and getattr(bl, "enabled", False):
+                    providers.append(bl)
+            if not providers:
+                await interaction.followup.send("Screenshot service not configured.", ephemeral=True)
+                return
+
+            result = None
+            for provider in providers:
+                result = await provider.screenshot_page(url)
+                if result.get("success"):
+                    break
+            if not result or not result.get("success"):
                 await interaction.followup.send(
                     f"Failed to take screenshot: {result.get('error', 'Unknown error')}",
                     ephemeral=True

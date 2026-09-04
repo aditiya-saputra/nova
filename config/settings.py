@@ -34,6 +34,10 @@ class Settings:
     BROWSERLESS_URL = os.getenv("BROWSERLESS_URL", "")
     BROWSERLESS_TOKEN = os.getenv("BROWSERLESS_TOKEN", "")
 
+    HYPERBROWSER_API_KEY = os.getenv("HYPERBROWSER_API_KEY", "")
+    # hyperbrowser | browserless | auto (default: hyperbrowser dulu, fallback browserless)
+    FETCH_PROVIDER = os.getenv("FETCH_PROVIDER", "auto").lower()
+
     COMPACTION_THRESHOLD = float(os.getenv("COMPACTION_THRESHOLD", "0.80"))
     COMPACTION_TARGET = float(os.getenv("COMPACTION_TARGET", "0.20"))
 

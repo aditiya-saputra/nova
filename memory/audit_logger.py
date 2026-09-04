@@ -133,6 +133,13 @@ class AuditLogger:
             logger.error(f"Error reading audit logs: {e}")
         return logs
 
+    async def aget_recent_logs(self, limit=50):
+        # File read bisa besar (seluruh audit.jsonl) — jangan block event loop.
+        return await asyncio.to_thread(self.get_recent_logs, limit)
+
+    async def aget_logs_by_type(self, event_type, limit=50):
+        return await asyncio.to_thread(self.get_logs_by_type, event_type, limit)
+
     def clear_old_logs(self, days=30):
         cutoff = time.time() - (days * 86400)
         cleared = 0

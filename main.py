@@ -5,6 +5,7 @@ from services.gemini_client import GeminiClient
 from services.groq_client import GroqClient
 from services.tavily_client import TavilyClient
 from services.browserless_client import BrowserlessClient
+from services.hyperbrowser_client import HyperbrowserClient
 from services.tool_executor import ToolExecutor
 from memory.session_manager import SessionManager
 from memory.history_store import HistoryStore
@@ -29,6 +30,7 @@ async def main():
     groq = GroqClient(settings)
     tavily = TavilyClient(settings)
     browserless = BrowserlessClient(settings)
+    hyperbrowser = HyperbrowserClient(settings)
     history_store = HistoryStore(settings)
     session_manager = SessionManager(settings, history_store)
     rag_store = RagStore(settings)
@@ -43,6 +45,7 @@ async def main():
 
     for name, obj in {
         "gemini": gemini, "groq": groq, "tavily": tavily, "browserless": browserless,
+        "hyperbrowser": hyperbrowser,
         "session_manager": session_manager, "history_store": history_store,
         "rag_store": rag_store, "context_builder": context_builder,
         "audit_logger": audit_logger, "github_backup": github_backup,
@@ -131,6 +134,11 @@ async def main():
         try:
             if hasattr(browserless, "aclose"):
                 await browserless.aclose()
+        except Exception:
+            pass
+        try:
+            if hasattr(hyperbrowser, "aclose"):
+                await hyperbrowser.aclose()
         except Exception:
             pass
         try:

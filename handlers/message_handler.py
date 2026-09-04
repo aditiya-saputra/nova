@@ -12,6 +12,13 @@ logger = get_logger(__name__)
 
 URL_PATTERN = re.compile(r'https?://[^\s<>"{}|\\^`\[\]]+')
 HISTORY_BUDGET = 20
+# #fix-stale: auto-fetch URL di pesan agar URL baru selalu segar (tidak dari RAG lama).
+MAX_AUTO_URLS = 2
+URL_CONTEXT_CHARS = 4000
+# Timeout Gemini: percobaan penuh 45s, retry 60s dengan history dipangkas.
+GEMINI_TIMEOUT = 45
+GEMINI_RETRY_TIMEOUT = 60
+HISTORY_RETRY_BUDGET = 8
 
 
 async def _bg_await(coro, label="bg"):
@@ -133,13 +140,14 @@ class MessageHandler:
         response = ""
 
         async with message.channel.typing():
-            # #1: Paralelkan I/O independen (VLM + RAG + compaction) via gather.
-            image_analyses, relevant_facts, _ = await asyncio.gather(
+            # #1: Paralelkan I/O independen (VLM + RAG + compaction + URL fetch) via gather.
+            image_analyses, relevant_facts, _, url_contexts = await asyncio.gather(
                 self.attachments.analyze(
                     image_attachments, content or "Deskripsikan gambar ini secara detail."
                 ),
                 self._retrieve_facts(content, message.channel.id),
                 self.compaction_engine.check_and_compact(channel_key, user_id),
+                self._fetch_url_contexts(urls),
             )
 
             self.session_manager.add_message(channel_key, "user", content)
@@ -147,19 +155,28 @@ class MessageHandler:
 
             try:
                 system_prompt = self.context_builder.build_system_prompt(metadata, relevant_facts)
-                final_prompt = self._build_final_prompt(content, image_analyses)
+                final_prompt = self._build_final_prompt(content, image_analyses, url_contexts)
                 tools = self.tool_executor.get_tools_for_gemini()
                 history = _to_gemini_history(self.session_manager.get_history(channel_key)[:-1])
 
-                # #5: timeout 30s — jangan tunggu Gemini gantung; fallback error cepat.
+                # Timeout berlapis: coba penuh dulu; bila timeout, retry sekali
+                # dengan history dipangkas (prompt panjang = penyebab umum lambat).
                 try:
                     gemini_response = await asyncio.wait_for(self.gemini.generate_with_tools(
                         final_prompt, tools,
                         system_instruction=system_prompt,
                         history=history or None,
-                    ), timeout=30)
+                    ), timeout=GEMINI_TIMEOUT)
                 except asyncio.TimeoutError:
-                    raise TimeoutError("Gemini generate_with_tools timeout (30s)")
+                    logger.warning(f"Gemini tools timeout ({GEMINI_TIMEOUT}s), retrying with trimmed history")
+                    try:
+                        gemini_response = await asyncio.wait_for(self.gemini.generate_with_tools(
+                            final_prompt, tools,
+                            system_instruction=system_prompt,
+                            history=history[-HISTORY_RETRY_BUDGET:] if history else None,
+                        ), timeout=GEMINI_RETRY_TIMEOUT)
+                    except asyncio.TimeoutError:
+                        raise TimeoutError(f"Gemini generate_with_tools timeout ({GEMINI_TIMEOUT}s+{GEMINI_RETRY_TIMEOUT}s)")
 
                 if gemini_response.get("type") == "tool_call":
                     tool_name = gemini_response.get("tool")
@@ -193,11 +210,24 @@ class MessageHandler:
                     try:
                         response = await asyncio.wait_for(self.gemini.synthesize_with_tool_result(
                             final_prompt, tool_result, system_instruction=system_prompt
-                        ), timeout=30)
+                        ), timeout=GEMINI_TIMEOUT)
                     except asyncio.TimeoutError:
-                        raise TimeoutError("Gemini synthesize timeout (30s)")
+                        raise TimeoutError(f"Gemini synthesize timeout ({GEMINI_TIMEOUT}s)")
                 else:
                     response = gemini_response.get("text", "")
+
+                # Retry sekali via generate polos bila kosong (thinking-only) —
+                # baru fallback bila tetap kosong (guard di bawah).
+                if not (response or "").strip():
+                    logger.warning("Gemini empty on first pass, retrying once without tools")
+                    try:
+                        response = await asyncio.wait_for(self.gemini.generate(
+                            final_prompt,
+                            system_instruction=system_prompt,
+                            history=history or None,
+                        ), timeout=GEMINI_TIMEOUT)
+                    except Exception as retry_e:
+                        logger.error(f"Gemini retry error: {retry_e}")
 
                 self.session_manager.add_message(channel_key, "assistant", response)
                 await self.history_store.aappend_message(channel_key, user_id, "assistant", response)
@@ -266,16 +296,43 @@ class MessageHandler:
         except Exception:
             return []
 
+    async def _fetch_url_contexts(self, urls):
+        """Auto-fetch URL di pesan (max MAX_AUTO_URLS) via ToolExecutor fallback.
+
+        Hasil segar di-injeksi ke prompt agar jawaban tidak basi dari RAG lama.
+        Return list[{url, title, content}]; [] bila tidak ada/gagal.
+        """
+        if not urls:
+            return []
+        contexts = []
+        for url in urls[:MAX_AUTO_URLS]:
+            try:
+                result = await self.tool_executor._fetch_webpage(url)
+                if result.get("success") and (result.get("content") or "").strip():
+                    text = result["content"][:URL_CONTEXT_CHARS]
+                    contexts.append({
+                        "url": url,
+                        "title": result.get("title", ""),
+                        "content": text,
+                    })
+                else:
+                    logger.warning(f"Auto-fetch empty/failed for {url}: {result.get('error')}")
+            except Exception as e:
+                logger.error(f"Auto-fetch error for {url}: {e}")
+        return contexts
+
     @staticmethod
-    def _build_final_prompt(content, image_analyses):
-        if not image_analyses:
-            return content
-        img_context = "\n\n[Image Attachments Analyzed by Nova VLM]:\n"
-        for i, img in enumerate(image_analyses, 1):
-            img_context += f"\n--- Image {i}: {img['filename']} ---\n{img['analysis']}\n"
-        if content:
-            return content + img_context
-        return f"User mengirim gambar tanpa teks.{img_context}"
+    def _build_final_prompt(content, image_analyses, url_contexts=None):
+        out = content or "User mengirim gambar/link tanpa teks."
+        if image_analyses:
+            out += "\n\n[Image Attachments Analyzed by Nova VLM]:\n"
+            for i, img in enumerate(image_analyses, 1):
+                out += f"\n--- Image {i}: {img['filename']} ---\n{img['analysis']}\n"
+        if url_contexts:
+            out += "\n\n[Webpage Content Auto-Fetched — GUNAKAN INI sebagai sumber utama untuk URL di bawah, jangan jawab dari memori lama]:\n"
+            for ctx in url_contexts:
+                out += f"\n--- URL: {ctx['url']} ---\nTitle: {ctx.get('title', '')}\n{ctx['content']}\n"
+        return out
 
     async def handle_delete(self, message):
         if message.author.bot:

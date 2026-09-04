@@ -46,20 +46,39 @@ class RagStore:
 
     async def save(self, channel_id, nugget):
         async with self._lock:
-            existing = self.load(channel_id)
+            existing = await asyncio.to_thread(self.load, channel_id)
             new_hash = _fact_hash(nugget.get("fact", ""))
             for old in existing[-DEDUP_SCAN_LINES:]:
                 if _fact_hash(old.get("fact", "")) == new_hash:
                     return False
 
             path = self._get_file_path(channel_id)
-            with open(path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(nugget) + "\n")
+            line = json.dumps(nugget) + "\n"
+            await asyncio.to_thread(self._append_line, path, line)
             return True
+
+    @staticmethod
+    def _append_line(path, line):
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(line)
+
+    @staticmethod
+    def _rewrite_file(path, valid):
+        if valid:
+            path.write_text(
+                "\n".join(json.dumps(n) for n in valid) + "\n",
+                encoding="utf-8"
+            )
+        else:
+            path.write_text("", encoding="utf-8")
+
+    async def aload(self, channel_id):
+        # Baca file di thread — dipanggil tiap pesan via clean_expired/get_all.
+        return await asyncio.to_thread(self.load, channel_id)
 
     async def clean_expired(self, channel_id):
         async with self._lock:
-            nuggets = self.load(channel_id)
+            nuggets = await asyncio.to_thread(self.load, channel_id)
             now = datetime.now(timezone.utc)
             valid = []
 
@@ -76,13 +95,7 @@ class RagStore:
 
             if len(valid) < len(nuggets):
                 path = self._get_file_path(channel_id)
-                if valid:
-                    path.write_text(
-                        "\n".join(json.dumps(n) for n in valid) + "\n",
-                        encoding="utf-8"
-                    )
-                else:
-                    path.write_text("", encoding="utf-8")
+                await asyncio.to_thread(self._rewrite_file, path, valid)
 
             return valid
 
@@ -103,6 +116,9 @@ class RagStore:
 
     def get_all(self, channel_id):
         return self.load(channel_id)
+
+    async def aget_all(self, channel_id):
+        return await asyncio.to_thread(self.load, channel_id)
 
     def list_channels(self):
         return [f.stem.replace("channel_", "") for f in self.base_dir.glob("channel_*.jsonl")]

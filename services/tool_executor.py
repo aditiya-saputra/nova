@@ -227,7 +227,7 @@ class ToolExecutor:
         if not channel_id:
             return {"error": "No channel ID"}
 
-        nuggets = rag_store.get_all(channel_id)
+        nuggets = await rag_store.aget_all(channel_id)
         if not nuggets:
             return {"memories": [], "count": 0}
 
@@ -299,9 +299,9 @@ class ToolExecutor:
             return {"error": "Audit logger not configured"}
 
         if event_type == "all":
-            logs = audit_logger.get_recent_logs(limit=limit)
+            logs = await audit_logger.aget_recent_logs(limit=limit)
         else:
-            logs = audit_logger.get_logs_by_type(event_type, limit=limit)
+            logs = await audit_logger.aget_logs_by_type(event_type, limit=limit)
 
         if not logs:
             return {"logs": [], "count": 0, "message": "No audit logs found"}
@@ -360,16 +360,43 @@ class ToolExecutor:
 
         return {"logs": formatted, "count": len(formatted)}
 
-    async def _fetch_webpage(self, url):
-        browserless = self.bot.browserless
-        if not browserless:
-            return {"error": "Browserless not configured"}
+    def _fetch_providers(self):
+        """Urutan provider fetch/screenshot berdasar FETCH_PROVIDER.
 
+        auto (default): hyperbrowser dulu, fallback browserless.
+        """
+        mode = (getattr(getattr(self.bot, "settings", None), "FETCH_PROVIDER", "auto") or "auto").lower()
+        hb = getattr(self.bot, "hyperbrowser", None)
+        bl = getattr(self.bot, "browserless", None)
+        hb_ok = bool(hb and getattr(hb, "enabled", False))
+        bl_ok = bool(bl and getattr(bl, "enabled", False))
+        if mode == "hyperbrowser":
+            return [p for p in (hb,) if hb_ok]
+        if mode == "browserless":
+            return [p for p in (bl,) if bl_ok]
+        ordered = []
+        if hb_ok:
+            ordered.append(hb)
+        if bl_ok:
+            ordered.append(bl)
+        return ordered
+
+    async def _fetch_webpage(self, url):
         if not url:
             return {"error": "No URL provided"}
 
-        result = await browserless.fetch_with_retry(url)
-        return result
+        providers = self._fetch_providers()
+        if not providers:
+            return {"error": "No fetch provider configured (Hyperbrowser/Browserless)"}
+
+        last = None
+        for provider in providers:
+            result = await provider.fetch_with_retry(url)
+            if result.get("success"):
+                return result
+            last = result
+            logger.warning(f"Fetch via {type(provider).__name__} failed, trying next: {result.get('error')}")
+        return last or {"error": "All fetch providers failed"}
 
     async def _get_online_users(self, status_filter="all"):
         status_map = {
@@ -444,17 +471,26 @@ class ToolExecutor:
             return {"error": f"Analysis failed: {str(e)}"}
 
     async def _screenshot_page(self, url, question="Analisis tampilan halaman ini."):
-        browserless = self.bot.browserless
         gemini = self.bot.gemini
 
-        if not browserless:
-            return {"error": "Browserless not configured"}
         if not gemini:
             return {"error": "Gemini not configured"}
         if not url:
             return {"error": "No URL provided"}
 
-        result = await browserless.screenshot_page(url)
+        providers = self._fetch_providers()
+        if not providers:
+            return {"error": "No screenshot provider configured (Hyperbrowser/Browserless)"}
+
+        last = None
+        for provider in providers:
+            result = await provider.screenshot_page(url)
+            if result.get("success"):
+                break
+            last = result
+            logger.warning(f"Screenshot via {type(provider).__name__} failed, trying next: {result.get('error')}")
+        else:
+            return last or {"error": "All screenshot providers failed"}
         if not result.get("success"):
             return {"error": result.get("error", "Failed to take screenshot")}
 

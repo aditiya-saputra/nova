@@ -249,7 +249,7 @@ class BrowserlessClient:
 
             payload = {
                 "url": url,
-                "waitFor": 2000,
+                "waitFor": 5000,
                 "args": [
                     "--no-sandbox",
                     "--disable-setuid-sandbox",
