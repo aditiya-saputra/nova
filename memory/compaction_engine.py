@@ -29,7 +29,8 @@ class CompactionEngine:
                 return False
 
             system_prompt = self.context_builder.build_compaction_prompt(history)
-            summary = self.groq_client.compact(history, system_prompt)
+            # GroqClient kini async (AsyncGroq) — await langsung, jangan block loop.
+            summary = await self.groq_client.compact(history, system_prompt)
 
             self.session_manager.replace_history(key, summary)
 

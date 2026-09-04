@@ -1,0 +1,4 @@
+2026-09-03 04:27:05,926 | [32mINFO[0m | memory.session_manager | Hydrated 3 entries for channel_1
+2026-09-03 04:29:13,469 | [32mINFO[0m | memory.session_manager | Hydrated 5 entries for c1
+2026-09-03 04:29:59,188 | [32mINFO[0m | memory.scheduled_jobs | Starting history cleanup...
+2026-09-03 04:29:59,193 | [32mINFO[0m | memory.scheduled_jobs | History cleanup complete: 1 entries cleaned

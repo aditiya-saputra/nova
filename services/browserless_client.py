@@ -1,7 +1,9 @@
 import re
 import html
 import hashlib
-from urllib.parse import urlparse
+import asyncio
+import socket
+from urllib.parse import urlparse, urljoin
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -70,10 +72,20 @@ class BrowserlessClient:
         self.timeout = 30
 
     def _is_safe_url(self, url):
+        """Sync literal check: scheme, IP literal, exact/suffix/octet rules, single-label.
+
+        Untuk hostname DNS, panggil _is_safe_url_async() yang juga resolve DNS
+        dan cek tiap IP hasil resolve (cegah DNS-rebinding ke private IP).
+        """
         try:
             parsed = urlparse(url)
             if parsed.scheme not in ('http', 'https'):
                 return False, "Only HTTP/HTTPS URLs are allowed"
+            # Tolak userinfo (user:pass@host) — sering dipakai untuk menyamarkan host.
+            if parsed.username or parsed.password or "@" in (parsed.netloc or ""):
+                # urlparse sudah strip userinfo dari hostname, tapi tetap tolak pola ini.
+                if "@" in url.split("://", 1)[-1].split("/", 1)[0]:
+                    return False, "Userinfo in URL is not allowed"
 
             hostname = parsed.hostname or ''
             if not hostname:
@@ -84,6 +96,7 @@ class BrowserlessClient:
                 ip = ipaddress.ip_address(hostname)
                 if _ip_in_blocked(hostname):
                     return False, f"Access to {hostname} is blocked"
+                return True, "OK"
             except ValueError:
                 pass
 
@@ -93,10 +106,45 @@ class BrowserlessClient:
                     return False, f"Access to {hostname} is blocked"
                 if kind == 'suffix' and (host_lower == value or host_lower.endswith('.' + value)):
                     return False, f"Access to {hostname} is blocked"
+                if kind == 'octet':
+                    # value seperti '10', '192.168', '172.16' — cocokkan dot-bounded
+                    # agar '10evil.com' tidak lolos via startswith naif, dan
+                    # '10.0.0.1.evil.com' tetap terdeteksi bila diawali oktet privat.
+                    if host_lower == value or host_lower.startswith(value + "."):
+                        return False, f"Access to {hostname} is blocked"
+                if kind == 'ipv6' and ':' in host_lower and host_lower == value.lower():
+                    return False, f"Access to {hostname} is blocked"
 
             if '.' not in host_lower:
                 return False, "Invalid hostname"
 
+            return True, "OK"
+        except Exception as e:
+            return False, f"Invalid URL: {str(e)}"
+
+    async def _is_safe_url_async(self, url):
+        """Sync check + resolve DNS dan pastikan tidak ada IP privat/loopback."""
+        ok, reason = self._is_safe_url(url)
+        if not ok:
+            return False, reason
+        try:
+            parsed = urlparse(url)
+            hostname = (parsed.hostname or "").lower().rstrip(".")
+            import ipaddress
+            try:
+                ipaddress.ip_address(hostname)
+                return True, "OK"  # sudah dicek literal di atas
+            except ValueError:
+                pass
+            loop = asyncio.get_running_loop()
+            try:
+                infos = await loop.getaddrinfo(hostname, None, family=socket.AF_UNSPEC, type=socket.SOCK_STREAM)
+            except Exception as e:
+                return False, f"DNS resolution failed for {hostname}: {e}"
+            for _fam, _typ, _proto, _canon, sockaddr in infos:
+                ip_str = sockaddr[0]
+                if _ip_in_blocked(ip_str):
+                    return False, f"Access to {hostname} is blocked (resolves to {ip_str})"
             return True, "OK"
         except Exception as e:
             return False, f"Invalid URL: {str(e)}"
@@ -171,7 +219,7 @@ class BrowserlessClient:
         return text.strip()
 
     async def fetch_content(self, url, mode="markdown"):
-        is_safe, reason = self._is_safe_url(url)
+        is_safe, reason = await self._is_safe_url_async(url)
         if not is_safe:
             return {"error": reason, "safe": False}
 
@@ -267,7 +315,7 @@ class BrowserlessClient:
         return result
 
     async def fetch_image(self, url):
-        is_safe, reason = self._is_safe_url(url)
+        is_safe, reason = await self._is_safe_url_async(url)
         if not is_safe:
             return {"error": reason, "safe": False}
 
@@ -277,27 +325,33 @@ class BrowserlessClient:
         try:
             import aiohttp
 
-            headers = {
-                "Authorization": f"Bearer {self.api_token}",
-            }
-
+            # Satu session untuk semua hop (Context7: reuse ClientSession).
+            # Auth header hanya untuk Browserless API; untuk GET image langsung
+            # jangan kirim Authorization ke host arbitrary, dan strip saat
+            # cross-origin redirect (per aiohttp 3.14.3 behavior).
             current_url = url
-            for _ in range(5):
-                async with aiohttp.ClientSession() as session:
+            origin_host = (urlparse(url).hostname or "").lower()
+            async with aiohttp.ClientSession() as session:
+                for _ in range(5):
                     async with session.get(
                         current_url,
-                        headers=headers,
                         timeout=aiohttp.ClientTimeout(total=30),
                         allow_redirects=False
                     ) as resp:
                         if resp.status in (301, 302, 303, 307, 308):
-                            location = resp.headers.get("Location", "")
+                            location = resp.headers.get("Location", "") or resp.headers.get("URI", "")
                             if not location:
                                 return {"error": "Redirect without Location", "safe": False}
-                            safe, reason = self._is_safe_url(location)
+                            # Selesaikan redirect relatif terhadap URL saat ini.
+                            next_url = urljoin(current_url, location)
+                            safe, reason = await self._is_safe_url_async(next_url)
                             if not safe:
                                 return {"error": f"Redirect blocked: {reason}", "safe": False}
-                            current_url = location
+                            next_host = (urlparse(next_url).hostname or "").lower()
+                            if next_host != origin_host:
+                                # Cross-origin: jangan bawa kredensial apapun.
+                                origin_host = next_host
+                            current_url = next_url
                             continue
                         if resp.status != 200:
                             return {"error": f"HTTP {resp.status}", "safe": False}

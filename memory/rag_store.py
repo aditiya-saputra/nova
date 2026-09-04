@@ -3,7 +3,7 @@ import uuid
 import asyncio
 import hashlib
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from config.settings import Settings
 from utils.logger import get_logger
 
@@ -60,13 +60,16 @@ class RagStore:
     async def clean_expired(self, channel_id):
         async with self._lock:
             nuggets = self.load(channel_id)
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             valid = []
 
             for nugget in nuggets:
                 try:
-                    expiry = datetime.fromisoformat(nugget["expiry"].replace("Z", "+00:00"))
-                    if expiry.replace(tzinfo=None) > now:
+                    raw = nugget["expiry"].replace("Z", "+00:00")
+                    expiry = datetime.fromisoformat(raw)
+                    if expiry.tzinfo is None:
+                        expiry = expiry.replace(tzinfo=timezone.utc)
+                    if expiry > now:
                         valid.append(nugget)
                 except (KeyError, ValueError):
                     continue
@@ -84,7 +87,7 @@ class RagStore:
             return valid
 
     def create_nugget(self, channel_id, user_id, message_id, fact):
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         expiry = now + timedelta(days=self.settings.NUGGETS_TTL_DAYS)
 
         return {

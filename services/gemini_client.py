@@ -64,6 +64,7 @@ class GeminiClient:
 
     async def _run_with_fallback(self, fn, label_prefix=""):
         last_error = None
+        primary_model = self.model_chain[0] if self.model_chain else self.model_name
         for model in self.model_chain:
             self.model_name = model
             logger.info(f"Trying model: {model}")
@@ -71,8 +72,8 @@ class GeminiClient:
                 api_key = self._get_next_key()
                 try:
                     result = await fn(api_key)
-                    if model != self.model_name:
-                        logger.info(f"Switched to model: {model} (fallback)")
+                    if model != primary_model:
+                        logger.info(f"Switched to model: {model} (fallback from {primary_model})")
                     return result
                 except Exception as e:
                     last_error = e

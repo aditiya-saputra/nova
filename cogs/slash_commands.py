@@ -42,9 +42,8 @@ class SlashCommands(commands.Cog):
             )
 
             try:
-                import asyncio
                 import json
-                response_text = await asyncio.to_thread(groq.retrieve_relevant, retrieve_prompt)
+                response_text = await groq.retrieve_relevant(retrieve_prompt)
                 relevant_facts = json.loads(response_text.strip().strip("```json").strip("```"))
                 if not isinstance(relevant_facts, list):
                     relevant_facts = []
@@ -87,8 +86,7 @@ class SlashCommands(commands.Cog):
             if response and not response.startswith("Error:"):
                 extract_prompt = context_builder.build_rag_extract_prompt(question, response, metadata)
                 try:
-                    import asyncio
-                    facts_response = await asyncio.to_thread(groq.extract_facts, extract_prompt)
+                    facts_response = await groq.extract_facts(extract_prompt)
                     facts = json.loads(facts_response.strip().strip("```json").strip("```"))
                     if isinstance(facts, list):
                         for fact in facts:
@@ -126,7 +124,6 @@ class SlashCommands(commands.Cog):
                 return
 
             if query:
-                import asyncio
                 import json
                 groq = self.bot.groq
                 nuggets_text = "\n".join(
@@ -134,7 +131,7 @@ class SlashCommands(commands.Cog):
                     for n in nuggets
                 )
                 retrieve_prompt = f"Query: {query}\n\nAvailable nuggets:\n{nuggets_text}\n\nSelect the 5 most relevant nuggets. Output as JSON array."
-                response_text = await asyncio.to_thread(groq.retrieve_relevant, retrieve_prompt)
+                response_text = await groq.retrieve_relevant(retrieve_prompt)
                 relevant = json.loads(response_text.strip().strip("```json").strip("```"))
                 if isinstance(relevant, list):
                     nuggets = [n for n in nuggets if n.get('fact', '') in relevant][:5]

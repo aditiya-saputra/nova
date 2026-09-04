@@ -1,5 +1,3 @@
-import asyncio
-import json
 import time
 import re
 import discord
@@ -74,6 +72,13 @@ class MessageHandler:
         })
 
     async def handle(self, message):
+        # Guard: bila ini prefix-command terdaftar (!clear, !stats, !ask, ...),
+        # biarkan process_commands yang menangani — AI skip agar tidak double-reply.
+        try:
+            if self.bot.router.is_bot_command(message):
+                return
+        except Exception:
+            pass
         trigger_type = self.bot.router.detect_trigger(message)
         if not trigger_type:
             return
@@ -200,28 +205,14 @@ class MessageHandler:
             await self.github_backup.backup("message_threshold")
             await self.audit_logger.log_backup("success", "Auto backup triggered")
 
-        await self.bot.process_commands(message)
+        # NOTE: process_commands dipanggil di main.py on_message (finally),
+        # bukan di sini, agar pesan command tetap diproses walau AI skip.
 
     async def _retrieve_facts(self, query, channel_id):
-        nuggets = await self.rag_store.clean_expired(channel_id)
-        if not nuggets:
-            return []
-        prompt_template = self.context_builder.load_prompt_template("rag_retrieve_prompt.txt")
-        nuggets_text = "\n".join(
-            f"- [{n.get('channel_id', 'N/A')}] {n.get('fact', '')} (by user {n.get('user_id', 'N/A')})"
-            for n in nuggets
-        )
-        retrieve_prompt = prompt_template.format(
-            query=query,
-            top_k=self.settings.NUGGETS_TOP_K,
-            nuggets_text=nuggets_text,
-        )
+        # Single source of truth via FactExtractor helper (hindari 3x duplikasi).
         try:
-            response_text = await asyncio.to_thread(self.groq.retrieve_relevant, retrieve_prompt)
-            relevant_facts = json.loads(response_text.strip().strip("```json").strip("```"))
-            if not isinstance(relevant_facts, list):
-                return []
-            return [f for f in relevant_facts if isinstance(f, str)][:self.settings.NUGGETS_TOP_K]
+            top_k = getattr(self.settings, "NUGGETS_TOP_K", 5)
+            return await self.fact_extractor.retrieve_relevant_facts(query, channel_id, top_k=top_k)
         except Exception:
             return []
 

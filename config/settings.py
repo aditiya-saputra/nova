@@ -49,3 +49,8 @@ class Settings:
 
     WELCOME_ENABLED = os.getenv("WELCOME_ENABLED", "false").lower() == "true"
     WELCOME_CHANNEL_ID = int(os.getenv("WELCOME_CHANNEL_ID", "0"))
+
+    BACKUP_ENABLED = os.getenv("BACKUP_ENABLED", "false").lower() == "true"
+    # Kanonis: GITHUB_BACKUP_REPO. Terima alias lama GITHUB_REPO agar tidak breaking.
+    GITHUB_BACKUP_REPO = os.getenv("GITHUB_BACKUP_REPO", "") or os.getenv("GITHUB_REPO", "")
+    GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")

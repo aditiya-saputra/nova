@@ -4,6 +4,41 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [1.5.0] - 2026-09-04
+
+### ✨ Added
+- **Shared RAG helper**: `FactExtractor.retrieve_relevant_facts()` (`handlers/fact_extractor.py`) jadi single source of truth untuk `MessageHandler`, `/ask`, dan `ToolExecutor`. Hapus 3x duplikasi prompt-build + JSON-parse.
+- **Double-command guard**: `MessageRouter.is_bot_command()` (`core/message_router.py`) — pesan prefix-command terdaftar (`!clear`, `!ask`, ...) di-skip dari AI handler agar tidak double-reply.
+- **Backup env kanonis**: `Settings.BACKUP_ENABLED` / `GITHUB_BACKUP_REPO` (alias lama `GITHUB_REPO` tetap didukung) + `GITHUB_TOKEN` (`config/settings.py`, `memory/github_backup.py`). `.env.example` didokumentasikan.
+- **Groq cleanup**: `GroqClient.aclose()` + dipanggil di `main.py` finally.
+
+### 🐛 Fixed (Reliability)
+- **Event-loop blocking (`groq`, `tavily`)**: `GroqClient` migrasi `groq.Groq` sync → `AsyncGroq(DefaultAioHttpClient)` (`services/groq_client.py`, per Context7 `/groq/groq-python`). Semua method (`compact`, `extract_facts`, `retrieve_relevant`, `process_search_results`, `synthesize`) kini `async` + `await`. Caller diupdate: `memory/compaction_engine.py`, `handlers/fact_extractor.py`, `handlers/message_handler.py`, `services/tool_executor.py`, `cogs/slash_commands.py`. `TavilyClient.search()` jadi `async` via `asyncio.to_thread` (`services/tavily_client.py`).
+- **Dead fallback log (`gemini_client._run_with_fallback`)**: bandingkan ke `primary_model` (`model_chain[0]`) bukan `self.model_name` yang selalu sama — log `Switched to model (fallback)` kini muncul benar (`services/gemini_client.py`).
+- **Stub prefix commands (`cogs/ai_commands.py`)**: `!ask`/`!ai` yang tadinya echo kini panggil Gemini + session + RAG + split 1900 char.
+- **Command routing (`main.py` + `handlers/message_handler.py`)**: `process_commands` pindah ke `main.py on_message finally` (discord.py best practice per Context7), dihapus dari akhir `MessageHandler.handle`. Pesan command tetap diproses walau AI skip.
+- **History race (`memory/history_store.py`)**: tambah `threading.Lock` untuk `append`/`clear`.
+- **Naive datetime (`memory/rag_store.py`)**: `utcnow()` → `now(timezone.utc)`, compare aware-vs-aware di `clean_expired`.
+- **Timestamp parse (`memory/scheduled_jobs.py`)**: terima ISO `Z`-suffix, `TypeError` → keep (fail-closed) di TTL prune + history cleanup.
+
+### 🐛 Fixed (Security)
+- **SSRF DNS-rebinding (`browserless_client`)**: tambah `_is_safe_url_async()` — sync literal check + `loop.getaddrinfo` dan tolak bila ada IP resolve yang `is_private/loopback/link_local/reserved/multicast/unspecified`. `fetch_content`/`fetch_image`/redirect hop kini pakai versi async.
+- **`octet` rule mati**: `BLOCKED_RULES` tipe `octet` kini dicek dot-bounded (`10` cocok `10.x` tapi tidak `10evil.com`); tolak userinfo (`user:pass@host`) dan single-label hostname.
+- **Redirect handling (`fetch_image`)**: satu `ClientSession` reuse (per Context7 `/aio-libs/aiohttp`), `urljoin` untuk `Location` relatif, dukung `Location`/`URI` header, tidak lagi kirim `Authorization: Bearer` ke host arbitrary + strip saat cross-origin. Hapus pembuatan session baru per hop.
+- **Missing dep (`requirements.txt`)**: tambah `aiohttp>=3.9.0` yang diimport `browserless_client` + `attachment_processor` tapi belum terdaftar.
+
+### 📦 Dependencies
+- Naikkan pin minimum: `google-genai>=2.22.0` (was `>=2.20.0`), `groq>=1.7.0` (tetap, tapi install lokal masih 1.5.0 — wajib `pip install -U`), `tavily-python>=0.8.1` (was `>=0.8.0`), `python-dotenv>=1.2.3` (was unpinned). Terinstall terverifikasi: `groq 1.7.0`, `google-genai 2.22.0`, `tavily 0.8.1`, `dotenv 1.2.3`, `aiohttp 3.14.3`, `discord.py 2.7.1`, `tiktoken 0.14.0`, `rich 15.0.0`. `AsyncGroq` + `DefaultAioHttpClient` + `genai.Client` + `TavilyClient` import check OK.
+- **Docs**: `services/token_counter.py` ditandai aproksimasi tiktoken→Gemini (bukan presisi billing).
+
+### ⚠️ Migration Notes
+- Semua pemanggil Groq harus `await` (sync wrapper dihapus). `asyncio.to_thread(groq...)` lama tidak berlaku.
+- `HistoryStore.append/clear` kini thread-safe tapi tetap sync — panggil langsung seperti biasa.
+- Env backup: pakai `GITHUB_BACKUP_REPO`; `GITHUB_REPO` lama masih dibaca sebagai fallback.
+- Struktur file tidak berubah (21 file modified, 0 tambah/hapus/pindah).
+
+---
+
 ## [1.4.2] - 2026-09-04
 
 ### ✨ Added

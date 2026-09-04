@@ -51,6 +51,32 @@ class MessageRouter:
 
         return False
 
+    def is_bot_command(self, message):
+        """True bila pesan adalah prefix-command terdaftar (agar AI tidak double-reply).
+
+        Per Context7 discord.py: on_message yang override harus tetap panggil
+        process_commands, jadi AI handler harus skip pesan command asli.
+        """
+        content = message.content or ""
+        prefixes = self.bot.command_prefix
+        if isinstance(prefixes, str):
+            prefixes = [prefixes]
+        matched_prefix = None
+        for prefix in prefixes:
+            if content.startswith(prefix):
+                matched_prefix = prefix
+                break
+        if not matched_prefix:
+            return False
+        rest = content[len(matched_prefix):].strip()
+        if not rest:
+            return False
+        cmd_name = rest.split()[0].lower()
+        try:
+            return self.bot.get_command(cmd_name) is not None
+        except Exception:
+            return False
+
     def clean_content(self, message, trigger_type):
         content = message.content or ""
 

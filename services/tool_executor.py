@@ -214,7 +214,7 @@ class ToolExecutor:
         if not tavily:
             return {"error": "Tavily not configured"}
 
-        result = tavily.search(query)
+        result = await tavily.search(query)
         if result:
             return {
                 "answer": result.get("answer", ""),
@@ -239,7 +239,7 @@ class ToolExecutor:
             )
             retrieve_prompt = f"Query: {query}\n\nMemories:\n{nuggets_text}\n\nSelect the {limit} most relevant. Output JSON array of facts."
             try:
-                response_text = groq.retrieve_relevant(retrieve_prompt)
+                response_text = await groq.retrieve_relevant(retrieve_prompt)
                 relevant = json.loads(response_text.strip().strip("```json").strip("```"))
                 if isinstance(relevant, list):
                     return {"memories": relevant[:limit], "count": len(relevant)}

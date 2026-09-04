@@ -78,12 +78,12 @@ class ScheduledJobs:
                                 record = json.loads(line.strip())
                                 ts = record.get("created_at") or record.get("timestamp") or 0
                                 if isinstance(ts, str):
-                                    ts = datetime.fromisoformat(ts).timestamp()
+                                    ts = datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
                                 if ts >= cutoff_time:
                                     kept_records.append(record)
                                 else:
                                     deleted_count += 1
-                            except (json.JSONDecodeError, KeyError, ValueError):
+                            except (json.JSONDecodeError, KeyError, ValueError, TypeError):
                                 kept_records.append(record)
 
                     if deleted_count > 0:
@@ -161,10 +161,14 @@ class ScheduledJobs:
             return None
         if isinstance(ts, (int, float)):
             return float(ts)
-        try:
-            return datetime.fromisoformat(ts).timestamp()
-        except (ValueError, TypeError):
-            return None
+        if isinstance(ts, str):
+            # Terima ISO dengan 'Z' maupun offset; kembalikan None bila tak terparse
+            # agar entry tidak terhapus diam-diam (fail-closed: keep).
+            try:
+                return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+            except (ValueError, TypeError):
+                return None
+        return None
 
     def get_status(self):
         return {

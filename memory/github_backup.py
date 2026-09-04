@@ -16,9 +16,10 @@ class GitHubBackup:
     def __init__(self, settings):
         self.settings = settings
         self.data_dir = settings.DATA_DIR
-        self.repo_url = os.getenv("GITHUB_BACKUP_REPO", "")
-        self.github_token = os.getenv("GITHUB_TOKEN", "")
-        self.backup_enabled = os.getenv("BACKUP_ENABLED", "false").lower() == "true"
+        # Sumber kanonis dari Settings (mendukung alias GITHUB_REPO lama).
+        self.repo_url = getattr(settings, "GITHUB_BACKUP_REPO", "") or os.getenv("GITHUB_BACKUP_REPO", "") or os.getenv("GITHUB_REPO", "")
+        self.github_token = getattr(settings, "GITHUB_TOKEN", "") or os.getenv("GITHUB_TOKEN", "")
+        self.backup_enabled = bool(getattr(settings, "BACKUP_ENABLED", False)) or os.getenv("BACKUP_ENABLED", "false").lower() == "true"
         self.message_counter = 0
         self.last_backup_time = time.time()
         self.backup_interval_messages = 10

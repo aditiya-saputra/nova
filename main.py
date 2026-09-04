@@ -82,6 +82,13 @@ async def main():
             await message_handler.handle(message)
         except Exception as e:
             logger.error(f"Unhandled on_message error: {e}")
+        finally:
+            # Selalu teruskan ke command processor (discord.py best practice).
+            # AI handler sudah skip pesan command via is_bot_command, jadi aman.
+            try:
+                await bot.process_commands(message)
+            except Exception as e:
+                logger.error(f"process_commands error: {e}")
 
     @bot.event
     async def on_message_delete(message):
@@ -113,6 +120,11 @@ async def main():
             pass
         try:
             await scheduled_jobs.stop()
+        except Exception:
+            pass
+        try:
+            if hasattr(groq, "aclose"):
+                await groq.aclose()
         except Exception:
             pass
         if not bot.is_closed():

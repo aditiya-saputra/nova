@@ -5,6 +5,13 @@ logger = get_logger(__name__)
 
 
 class TokenCounter:
+    """Estimasi token berbasis tiktoken cl100k_base (OpenAI).
+
+    PENTING: ini HANYA aproksimasi untuk Gemini (SentencePiece-based).
+    Jangan dipakai untuk billing presisi — hanya untuk compaction threshold.
+    Untuk akurasi penuh, gunakan Gemini count_tokens API.
+    """
+
     def __init__(self):
         try:
             self.encoding = tiktoken.get_encoding("cl100k_base")
