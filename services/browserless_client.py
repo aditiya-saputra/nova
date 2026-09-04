@@ -263,12 +263,16 @@ class BrowserlessClient:
                 "Content-Type": "application/json"
             }
 
+            # Instance chrome.browserless.io (openresty, API v1) wajib auth via
+            # query ?token= — header Bearer saja dibalas 500 (terverifikasi
+            # 2026-09-04: Bearer-only 500, ?token= 200). Kirim keduanya.
+            token_qs = f"?token={self.api_token}"
             if mode == "pdf":
-                endpoint = f"{self.api_url}/pdf"
+                endpoint = f"{self.api_url}/pdf{token_qs}"
             elif mode == "screenshot":
-                endpoint = f"{self.api_url}/screenshot"
+                endpoint = f"{self.api_url}/screenshot{token_qs}"
             else:
-                endpoint = f"{self.api_url}/content"
+                endpoint = f"{self.api_url}/content{token_qs}"
 
             async with session.post(
                 endpoint,

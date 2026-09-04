@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [1.6.2] - 2026-09-04
+
+### 🐛 Fixed (Browserless auth)
+- **500 semua request (`services/browserless_client.py`)**: instance `chrome.browserless.io` (openresty, API v1) tidak kenal auth header `Bearer` saja — dibalas 500 untuk URL/token apapun. Endpoint kini sertakan `?token=` (header Bearer tetap dikirim). Terverifikasi: `?token=` → 200 + konten asli (README 8221 bytes).
+
+---
+
 ## [1.6.1] - 2026-09-04
 
 ### 🐛 Fixed (Discord + Gemini warnings dari server log)
