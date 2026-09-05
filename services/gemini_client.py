@@ -1,6 +1,7 @@
 import asyncio
 import random
 import json
+import httpx
 from google import genai
 from google.genai import types
 from config.settings import Settings
@@ -24,6 +25,10 @@ class GeminiClient:
         logger.info(f"Gemini model chain: {self.model_chain}")
         # #3: cache genai.Client per API key — jangan bikin baru tiap call.
         self._clients: dict[str, object] = {}
+        # #10: shared transport async (httpx) untuk semua client. Ini menghindari
+        # resolver DNS aiodns/aiohttp yang rusak di sebagian environment Windows
+        # ("Could not contact DNS servers") — httpx memakai resolver OS yang normal.
+        self._async_http = httpx.AsyncClient(timeout=120)
 
     def _is_not_found_error(self, e):
         code = getattr(e, "code", None) or getattr(e, "status_code", None)
@@ -80,9 +85,21 @@ class GeminiClient:
         # #3: reuse client per key (genai.Client menyimpan httpx connection pool).
         client = self._clients.get(api_key)
         if client is None:
-            client = genai.Client(api_key=api_key)
+            client = genai.Client(
+                api_key=api_key,
+                http_options=types.HttpOptions(
+                    httpx_async_client=self._async_http,
+                ),
+            )
             self._clients[api_key] = client
         return client
+
+    async def aclose(self):
+        """Tutup transport HTTP bersama saat shutdown (hindari warning unclosed)."""
+        try:
+            await self._async_http.aclose()
+        except Exception:
+            pass
 
     def _build_config(self, system_instruction=None):
         config = types.GenerateContentConfig(
@@ -228,14 +245,24 @@ class GeminiClient:
 
         return await self._run_with_fallback(_call, "generate_with_tools")
 
-    async def synthesize_with_tool_result(self, original_prompt, tool_result, system_instruction=None):
+    async def synthesize_with_tool_result(self, original_prompt, tool_result, system_instruction=None, last_assistant=None):
         config = self._build_config(system_instruction)
         prompt = f"""Original request: {original_prompt}
-
+"""
+        if last_assistant:
+            prompt += f"""
+Previous answer you already gave to the user:
+{last_assistant[:2000]}
+"""
+        prompt += f"""
 Tool execution result:
 {json.dumps(tool_result, indent=2) if isinstance(tool_result, dict) else str(tool_result)}
 
-Based on the tool result above, provide a helpful response to the user."""
+IMPORTANT RULES:
+- "Original request" is the CURRENT, LATEST user message. Answer THAT, not an earlier question.
+- "Previous answer" is what you already sent the user. If the current request is only a short reaction/acknowledgment (e.g. "dih ada aku ternyata", "iya iya", "oke cukup"), reply briefly to it. Do NOT re-print the previous report/list/format again.
+- Never repeat your previous message verbatim. Vary the wording if you must address similar content.
+- If the tool result does not directly answer the current request, say so concisely instead of dumping the whole result."""
 
         async def _call(api_key):
             client = self._get_client(api_key)

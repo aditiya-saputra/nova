@@ -1,5 +1,6 @@
 import discord
 from utils.logger import get_logger
+from utils.time_utils import to_wib_iso
 
 logger = get_logger(__name__)
 
@@ -104,7 +105,7 @@ class MessageRouter:
             "user_name": message.author.display_name,
             "channel_id": message.channel.id,
             "channel_name": getattr(message.channel, "name", "DM"),
-            "timestamp": message.created_at.isoformat(),
+            "timestamp": to_wib_iso(message.created_at),
             "trigger_type": trigger_type,
             "message_id": message.id,
             "guild_id": message.guild.id if message.guild else None,

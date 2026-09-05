@@ -4,6 +4,7 @@ from discord import app_commands
 from discord.ext import commands
 from utils.logger import get_logger
 from utils.rich_presenter import rich
+from utils.time_utils import format_wib, to_wib_iso
 
 logger = get_logger(__name__)
 
@@ -56,7 +57,7 @@ class SlashCommands(commands.Cog):
                 "user_name": interaction.user.display_name,
                 "channel_id": interaction.channel_id,
                 "channel_name": getattr(interaction.channel, "name", "DM"),
-                "timestamp": discord.utils.utcnow().isoformat(),
+                "timestamp": to_wib_iso(discord.utils.utcnow()),
                 "trigger_type": "slash_command",
                 "guild_id": interaction.guild_id,
                 "guild_name": interaction.guild.name if interaction.guild else None,
@@ -146,7 +147,9 @@ class SlashCommands(commands.Cog):
             for i, nugget in enumerate(nuggets[:10]):
                 fact = nugget.get("fact", "N/A")
                 user_id = nugget.get("user_id", "N/A")
-                created = nugget.get("created_at", "N/A")
+                created = nugget.get("timestamp") or nugget.get("created_at") or "N/A"
+                if created != "N/A":
+                    created = format_wib(created)
                 embed.add_field(
                     name=f"Memory {i+1}",
                     value=f"{fact}\n*by {user_id} - {created}*",
@@ -158,6 +161,51 @@ class SlashCommands(commands.Cog):
         except Exception as e:
             logger.error(f"Slash /recall error: {e}")
             await interaction.followup.send(f"Error: {str(e)}")
+
+    @app_commands.command(name="forget", description="Hapus semua ingatan Nova di channel ini (memori RAG + riwayat percakapan)")
+    @app_commands.default_permissions(manage_messages=True)
+    async def forget_slash(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+
+        try:
+            channel_key = f"channel_{interaction.channel_id}"
+            rag_store = self.bot.rag_store
+            session_manager = self.bot.session_manager
+            lines = []
+
+            if rag_store:
+                count = len(await rag_store.aget_all(interaction.channel_id))
+                await rag_store.delete_channel(interaction.channel_id)
+                lines.append(f"🧠 Memori (RAG): {count} fakta dihapus")
+
+            if session_manager:
+                session_manager.clear(channel_key)
+                lines.append("💬 Riwayat percakapan (session): dibersihkan")
+
+            # Reset tracker anti-repeat channel ini agar tidak carry-over.
+            mh = getattr(self.bot, "message_handler", None)
+            if mh is not None:
+                for tracker in (getattr(mh, "_last_tool_calls", None), getattr(mh, "_last_response_text", None)):
+                    if isinstance(tracker, dict):
+                        tracker.pop(channel_key, None)
+
+            audit_logger = self.bot.audit_logger
+            if audit_logger:
+                await audit_logger.log("memory_cleared", {
+                    "user_id": interaction.user.id,
+                    "user_name": interaction.user.display_name,
+                    "channel_id": interaction.channel_id,
+                    "channel_name": getattr(interaction.channel, "name", "DM"),
+                })
+
+            await interaction.followup.send(
+                "🗑️ Udah diapus semua ingatan Nova di channel ini.\n\n" + "\n".join(lines),
+                ephemeral=True
+            )
+
+        except Exception as e:
+            logger.error(f"Slash /forget error: {e}")
+            await interaction.followup.send(f"Error: {str(e)}", ephemeral=True)
 
     @app_commands.command(name="history", description="View conversation history")
     @app_commands.describe(limit="Number of messages to show (default: 10)")
@@ -228,7 +276,7 @@ class SlashCommands(commands.Cog):
 
                 embed.add_field(
                     name=f"{user_name} in #{channel_name}",
-                    value=f"**Content:** {content}\n*Created: {created_at[:19]}*\n*Deleted: {deleted_at[:19]}*",
+                    value=f"**Content:** {content}\n*Created: {format_wib(created_at)}*\n*Deleted: {format_wib(deleted_at)}*",
                     inline=False
                 )
 
@@ -263,7 +311,7 @@ class SlashCommands(commands.Cog):
 
             for log in logs:
                 event = log.get("event", "unknown")
-                timestamp = log.get("timestamp", "")[:19]
+                timestamp = format_wib(log.get("timestamp", ""))
                 data = log.get("data", {})
 
                 if event == "message_deleted":
@@ -456,9 +504,7 @@ class SlashCommands(commands.Cog):
 
             last_mention = pref.get("last_mention", 0)
             if last_mention > 0:
-                from datetime import datetime
-                last_dt = datetime.fromtimestamp(last_mention).strftime("%d %b %Y %H:%M")
-                last_text = f"\nTerakhir di-mention: {last_dt}"
+                last_text = f"\nTerakhir di-mention: {format_wib(last_mention)}"
             else:
                 last_text = "\nBelum pernah di-mention"
 

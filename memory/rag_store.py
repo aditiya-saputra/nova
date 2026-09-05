@@ -122,3 +122,14 @@ class RagStore:
 
     def list_channels(self):
         return [f.stem.replace("channel_", "") for f in self.base_dir.glob("channel_*.jsonl")]
+
+    @staticmethod
+    def _delete_file(path):
+        if path.exists():
+            path.unlink()
+
+    async def delete_channel(self, channel_id):
+        """Hapus semua nugget memori untuk satu channel (file JSONL dihapus)."""
+        async with self._lock:
+            path = self._get_file_path(channel_id)
+            await asyncio.to_thread(self._delete_file, path)

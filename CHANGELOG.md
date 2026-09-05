@@ -4,6 +4,51 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [1.7.4] - 2026-09-05
+
+### ✨ Added (command hapus ingatan)
+- **Slash command `/forget`** (admin, `manage_messages`): hapus semua memori RAG channel + riwayat percakapan/session + reset tracker anti-repeat. `memory/rag_store.py` mendapat method `delete_channel()`.
+
+### 🌐 Changed (timezone WIB)
+- **`utils/time_utils.py`**: helper baru `to_wib()` / `to_wib_iso()` / `format_wib()` berbasis `pytz` (Asia/Jakarta, UTC+7). Penyimpanan internal tetap UTC — konversi hanya di sisi tampilan, jadi logika TTL/expired tidak berubah.
+- **Display WIB**: `/recall`, `/deleted`, `/audit`, `/mystatus`, serta "Time:" di system prompt (pesan & `/ask`) kini menampilkan waktu WIB.
+- **Fix `/recall`**: timestamp memori dulu selalu "N/A" (membaca field `created_at` yang tidak ada) — kini membaca field `timestamp`.
+- **Dependency**: `pytz` ditambahkan ke `requirements.txt`.
+
+### 🔧 Changed (default model Gemini)
+- `config/settings.py`: default `GEMINI_MODEL` diubah `gemini-3.6-flash` → `gemini-3-flash-preview`; default `GEMINI_FALLBACK_MODELS` kini `gemini-flash-latest,gemini-flash-lite-latest` (config kosong tidak lagi memakai model thinking-only / nonaktif).
+
+### ⚠️ Migration Notes
+- Jalankan `pip install -r requirements.txt` (menambah `pytz`).
+- Restart Nova.
+
+---
+
+## [1.7.3] - 2026-09-05
+
+### 🐛 Fixed (bot mengulang jawaban yang sama persis untuk prompt berbeda)
+- **Root cause**: tool `get_online_users` di-panggil ulang pada follow-up singkat (mis. "dih ada aku ternyata", "oke cukup 2M sih"), lalu `synthesize_with_tool_result` yang stateless menyusun ulang laporan dari data tool yang sama → output byte-for-byte identik.
+- **Anti-repeat gate (`handlers/message_handler.py`)**: jika Gemini memilih tool yang **sama + args sama** dengan tool pada turn sebelumnya DAN pesan user singkat (≤ `SHORT_REACTION_MAX`), tool TIDAK dieksekusi ulang — diganti balasan singkat via `_build_reaction_prompt`.
+- **Stateful synthesize (`services/gemini_client.py`)**: `synthesize_with_tool_result` kini menerima `last_assistant` (jawaban sebelumnya) dan instruksi tegas untuk menjawab pesan terbaru, tidak menyalin ulang laporan/format lama, dan tidak mengulang verbatim.
+- **Prompt guard (`config/prompts/personality.txt`)**: aturan baru — reaksi singkat tidak boleh memicu tool/format penuh; jangan pernah mengulang pesan persis sama.
+- Pelacak `_last_response_text[channel]/_last_tool_calls[channel]` per channel untuk anti-repeat dan grounding synth.
+
+### ⚠️ Migration Notes
+- Tidak ada perubahan env. Restart Nova untuk memuat perbaikan.
+
+---
+
+## [1.7.2] - 2026-09-05
+
+### 🐛 Fixed (latensi Gemini & fallback invalid)
+- **`gemini-3.6-flash` lambat ~25-28s bahkan untuk prompt pendek** karena model ini **thinking-only** (`thinking: true` di metadata API; `thinking_budget=0` ditolak API dengan 400, budget kecil 32/64 tetap ~27s) — thinking-nya tidak bisa dimatikan. Model utama diganti ke **`gemini-3-flash-preview`** (terverifikasi 1.3-1.8s di probe latensi dengan config bot).
+- **Fallback `gemini-3.0-flash` invalid (404 NOT_FOUND)** — bukan model yang tersedia. Rantai fallback diganti ke `gemini-flash-latest,gemini-flash-lite-latest` (terverifikasi tersedia & cepat di probe latensi).
+
+### ⚠️ Migration Notes
+- Update `.env` server: `GEMINI_MODEL=gemini-3-flash-preview`, `GEMINI_FALLBACK_MODELS=gemini-flash-latest,gemini-flash-lite-latest`, lalu restart Nova. Cek log startup `Gemini model chain: [...]` untuk konfirmasi rantai model baru.
+
+---
+
 ## [1.7.1] - 2026-09-05
 
 ### 🔄 Changed (migrasi model Gemini)

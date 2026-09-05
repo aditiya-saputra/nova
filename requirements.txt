@@ -8,3 +8,4 @@ requests
 tiktoken
 rich
 aiohttp>=3.9.0
+pytz

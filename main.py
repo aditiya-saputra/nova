@@ -139,6 +139,12 @@ async def main():
                 await groq.aclose()
         except Exception:
             pass
+        # #10: tutup shared httpx transport Gemini (liat gemini_client.aclose).
+        try:
+            if hasattr(gemini, "aclose"):
+                await gemini.aclose()
+        except Exception:
+            pass
         # #3: tutup shared aiohttp sessions agar tidak warning unclosed.
         try:
             if hasattr(browserless, "aclose"):

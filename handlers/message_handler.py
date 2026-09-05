@@ -1,4 +1,5 @@
 import asyncio
+import json
 import time
 import re
 import discord
@@ -19,6 +20,8 @@ URL_CONTEXT_CHARS = 4000
 GEMINI_TIMEOUT = 45
 GEMINI_RETRY_TIMEOUT = 60
 HISTORY_RETRY_BUDGET = 8
+# #repeat: follow-up singkat yang kemungkinan besar reaksi/konfirmasi.
+SHORT_REACTION_MAX = 24
 
 
 async def _bg_await(coro, label="bg"):
@@ -82,6 +85,8 @@ class MessageHandler:
         self.cache = MessageCache()
         self.attachments = AttachmentProcessor(gemini)
         self.fact_extractor = FactExtractor(groq, rag_store, audit_logger)
+        self._last_tool_calls = {}
+        self._last_response_text = {}
 
     def cache_message(self, message):
         if message.author.bot:
@@ -192,27 +197,43 @@ class MessageHandler:
                         "tool_args": tool_args,
                     }), "tool_call")
 
-                    tool_result = await self.tool_executor.execute(
-                        tool_name, tool_args,
-                        channel_id=message.channel.id,
-                        user_id=user_id,
-                    )
+                    last_assistant = self._last_response_text.get(channel_key, "")
 
-                    # #2: audit tool_result jangan block synthesize.
-                    _spawn(self.audit_logger.log("tool_result", {
-                        "user_id": user_id,
-                        "channel_id": message.channel.id,
-                        "tool_name": tool_name,
-                        "result_length": len(str(tool_result)),
-                        "success": not str(tool_result).startswith("Error"),
-                    }), "tool_result")
-
-                    try:
-                        response = await asyncio.wait_for(self.gemini.synthesize_with_tool_result(
-                            final_prompt, tool_result, system_instruction=system_prompt
+                    if self._should_skip_repeated_tool(channel_key, tool_name, tool_args, content):
+                        logger.info(
+                            f"Skipping repeated {tool_name} call (short follow-up), "
+                            "answering conversationally"
+                        )
+                        response = await asyncio.wait_for(self.gemini.generate(
+                            self._build_reaction_prompt(content, last_assistant),
+                            system_instruction=system_prompt,
                         ), timeout=GEMINI_TIMEOUT)
-                    except asyncio.TimeoutError:
-                        raise TimeoutError(f"Gemini synthesize timeout ({GEMINI_TIMEOUT}s)")
+                    else:
+                        self._last_tool_calls[channel_key] = {
+                            "tool": tool_name, "args": tool_args,
+                        }
+                        tool_result = await self.tool_executor.execute(
+                            tool_name, tool_args,
+                            channel_id=message.channel.id,
+                            user_id=user_id,
+                        )
+
+                        # #2: audit tool_result jangan block synthesize.
+                        _spawn(self.audit_logger.log("tool_result", {
+                            "user_id": user_id,
+                            "channel_id": message.channel.id,
+                            "tool_name": tool_name,
+                            "result_length": len(str(tool_result)),
+                            "success": not str(tool_result).startswith("Error"),
+                        }), "tool_result")
+
+                        try:
+                            response = await asyncio.wait_for(self.gemini.synthesize_with_tool_result(
+                                final_prompt, tool_result, system_instruction=system_prompt,
+                                last_assistant=last_assistant,
+                            ), timeout=GEMINI_TIMEOUT)
+                        except asyncio.TimeoutError:
+                            raise TimeoutError(f"Gemini synthesize timeout ({GEMINI_TIMEOUT}s)")
                 else:
                     response = gemini_response.get("text", "")
 
@@ -245,6 +266,9 @@ class MessageHandler:
 
         latency = time.time() - start_time
         rich.response_stats(len(response.split()), latency)
+
+        if response and not response.startswith("Error:"):
+            self._last_response_text[channel_key] = response
 
         # Reply dulu agar user tidak nunggu audit/RAG/backup.
         if self.settings.BOT_REPLY_MENTION:
@@ -333,6 +357,39 @@ class MessageHandler:
             for ctx in url_contexts:
                 out += f"\n--- URL: {ctx['url']} ---\nTitle: {ctx.get('title', '')}\n{ctx['content']}\n"
         return out
+
+    @staticmethod
+    def _normalize_args(args):
+        try:
+            return json.dumps(args, sort_keys=True, ensure_ascii=False)
+        except Exception:
+            return str(args)
+
+    def _should_skip_repeated_tool(self, channel_key, tool_name, tool_args, content):
+        """Anti-repeat: tool yang sama + args sama + follow-up singkat → jangan re-run.
+
+        Follow-up pendek biasanya reaksi/konfirmasi ("dih ada aku ternyata",
+        "oke cukup 2M sih"), bukan pertanyaan baru — re-run tool cuma melahirkan
+        laporan yang sama persis.
+        """
+        prev = self._last_tool_calls.get(channel_key)
+        if not prev:
+            return False
+        if tool_name != prev.get("tool"):
+            return False
+        if self._normalize_args(tool_args) != self._normalize_args(prev.get("args", {})):
+            return False
+        return len((content or "").strip()) <= SHORT_REACTION_MAX
+
+    @staticmethod
+    def _build_reaction_prompt(content, last_assistant):
+        return (
+            f"User menanggapi jawabanmu sebelumnya dengan singkat:\n"
+            f"\"{content}\"\n\n"
+            f"Jawabanmu sebelumnya:\n\"{last_assistant[:2000]}\"\n\n"
+            f"Balas reaksi itu dengan singkat (1-2 kalimat, gaya tsundere) sesuai isi pesan user. "
+            f"JANGAN memanggil tool, JANGAN mengulang laporan/format penuh dari jawaban sebelumnya."
+        )
 
     async def handle_delete(self, message):
         if message.author.bot:

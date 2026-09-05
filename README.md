@@ -55,12 +55,17 @@ Untuk mengganti API key:
 
 Old values yang pernah bocor ada di `secrets/.env.archive` — anggap compromised, rotate segera.
 
+### Waktu (Timezone)
+Semua timestamp yang ditampilkan ke user (audit logs, memory recall, status, dll.) memakai **WIB (Asia/Jakarta, UTC+7)** via `pytz`. Penyimpanan internal tetap UTC agar logika TTL & expired konsisten.
+
 ### Gemini Model & Fallback
 Nova memakai rantai model Gemini: `GEMINI_MODEL` sebagai model utama, lalu `GEMINI_FALLBACK_MODELS` (comma-separated) sebagai cadangan. Saat model yang sedang dipakai mengembalikan error 404 NOT_FOUND (mis. model sudah deprecated / tidak tersedia untuk key baru), client otomatis mencoba model berikutnya di rantai secara berurutan. (Error rate-limit 429/503 justru memicu retry dengan rotasi API key, bukan ganti model.)
 
+`gemini-3.6-flash` ternyata **model thinking-only** (`thinking: true` di metadata API; `thinking_budget=0` ditolak, budget kecil tetap ~27s) — lambatnya tidak bisa dihilangkan, jadi model utama memakai **`gemini-3-flash-preview`** yang terverifikasi cepat (~1.3-1.8s di probe latensi).
+
 ```env
-GEMINI_MODEL=gemini-3.6-flash
-GEMINI_FALLBACK_MODELS=gemini-3.0-flash
+GEMINI_MODEL=gemini-3-flash-preview
+GEMINI_FALLBACK_MODELS=gemini-flash-latest,gemini-flash-lite-latest
 ```
 
 Catatan:
@@ -74,6 +79,7 @@ Catatan:
 |---------|-------------|
 | `/ask` | Tanya sesuatu ke Nova |
 | `/recall` | Cari fakta/memori tersimpan di channel |
+| `/forget` | Hapus semua ingatan Nova di channel (memori RAG + riwayat) — admin |
 | `/history` | Lihat riwayat percakapan |
 | `/deleted` | Lihat log pesan yang dihapus |
 | `/audit` | Lihat audit log bot (deleted, edited, tool calls, errors) |
@@ -114,8 +120,8 @@ BOT_PREFIX=n!,.,?
 
 # Gemini API
 GEMINI_API_KEYS=key1,key2,key3
-GEMINI_MODEL=gemini-3.6-flash
-GEMINI_FALLBACK_MODELS=gemini-3.0-flash
+GEMINI_MODEL=gemini-3-flash-preview
+GEMINI_FALLBACK_MODELS=gemini-flash-latest,gemini-flash-lite-latest
 
 # Groq API
 GROQ_API_KEY=your_groq_api_key
