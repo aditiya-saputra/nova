@@ -27,6 +27,15 @@ async def main():
     settings = bot.settings
 
     gemini = GeminiClient(settings)
+
+    # Fail-fast: verifikasi rantai model Gemini sebelum bot online. Seluruh rantai
+    # deprecated/404 → abort startup, bukan nunggu error mentah muncul di chat.
+    try:
+        await gemini.verify_model_chain()
+    except RuntimeError as e:
+        logger.error(f"Startup aborted: {e}")
+        return
+
     groq = GroqClient(settings)
     tavily = TavilyClient(settings)
     browserless = BrowserlessClient(settings)

@@ -55,6 +55,19 @@ Untuk mengganti API key:
 
 Old values yang pernah bocor ada di `secrets/.env.archive` — anggap compromised, rotate segera.
 
+### Gemini Model & Fallback
+Nova memakai rantai model Gemini: `GEMINI_MODEL` sebagai model utama, lalu `GEMINI_FALLBACK_MODELS` (comma-separated) sebagai cadangan. Saat model yang sedang dipakai mengembalikan error 404 NOT_FOUND (mis. model sudah deprecated / tidak tersedia untuk key baru), client otomatis mencoba model berikutnya di rantai secara berurutan. (Error rate-limit 429/503 justru memicu retry dengan rotasi API key, bukan ganti model.)
+
+```env
+GEMINI_MODEL=gemini-3.6-flash
+GEMINI_FALLBACK_MODELS=gemini-3.0-flash
+```
+
+Catatan:
+- Urutan fallback mengikuti urutan penulisan — model pertama yang berhasil yang dipakai.
+- Jangan masukkan model yang sudah deprecated (mis. `gemini-2.5-flash`) ke dalam rantai; Gemini menolaknya dengan 404 untuk key baru.
+- Saat startup, Nova memverifikasi rantai model ke API Gemini dan mencatatnya di log (`Gemini model chain: [...]`). Bila seluruh rantai tidak tersedia, startup dibatalkan (fail-fast) sebelum bot online — cek log `Startup aborted` bila bot tidak menyala.
+
 ## ⚡ Slash Commands
 
 | Command | Description |
@@ -102,6 +115,7 @@ BOT_PREFIX=n!,.,?
 # Gemini API
 GEMINI_API_KEYS=key1,key2,key3
 GEMINI_MODEL=gemini-3.6-flash
+GEMINI_FALLBACK_MODELS=gemini-3.0-flash
 
 # Groq API
 GROQ_API_KEY=your_groq_api_key

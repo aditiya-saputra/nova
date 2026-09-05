@@ -19,6 +19,9 @@ class GeminiClient:
         self.model_name = settings.GEMINI_MODEL
         self.fallback_models = settings.GEMINI_FALLBACK_MODELS
         self.model_chain = [self.model_name] + self.fallback_models
+        # Log rantai model sekali saat startup agar drift config (mis. model deprecated)
+        # langsung terlihat di log, bukan hanya saat API menolak.
+        logger.info(f"Gemini model chain: {self.model_chain}")
         # #3: cache genai.Client per API key — jangan bikin baru tiap call.
         self._clients: dict[str, object] = {}
 
@@ -26,6 +29,45 @@ class GeminiClient:
         code = getattr(e, "code", None) or getattr(e, "status_code", None)
         msg = str(e)
         return code in NOT_FOUND_CODES or "NOT_FOUND" in msg or "no longer available" in msg.lower()
+
+    async def verify_model_chain(self):
+        """Cek ketersediaan rantai model ke API Gemini saat startup (fail-fast).
+
+        - Model yang 404 (deprecated/typo) → log error keras per model.
+        - Seluruh rantai tidak tersedia → raise RuntimeError agar bot tidak start
+          (lebih baik abort di sini daripada error 404 muncul di chat).
+        - Error non-404 (auth/network, mis. key placeholder) → hanya warning dan
+          verifikasi dihentikan: bukan indikasi model mati, jadi tidak fatal.
+        """
+        if not self.keys:
+            logger.error("No Gemini API keys configured — cannot verify model chain.")
+            return
+        client = self._get_client(self.keys[0])
+        available, missing = [], []
+        for model in self.model_chain:
+            try:
+                await client.aio.models.get(model=model)
+                available.append(model)
+            except Exception as e:
+                if self._is_not_found_error(e):
+                    logger.error(
+                        f"Gemini model '{model}' NOT AVAILABLE at startup ({e}). "
+                        "Perbaiki GEMINI_MODEL/GEMINI_FALLBACK_MODELS di .env ke model yang masih didukung."
+                    )
+                    missing.append(model)
+                else:
+                    logger.warning(
+                        f"Gemini model check for '{model}' skipped (bukan 404: {e}) "
+                        "— verifikasi tidak bisa jalan, lanjut startup."
+                    )
+                    return
+        if missing and not available:
+            raise RuntimeError(
+                f"Semua model Gemini tidak tersedia: {missing}. "
+                "Perbaiki GEMINI_MODEL/GEMINI_FALLBACK_MODELS di .env sebelum start."
+            )
+        logger.info(f"Gemini model chain check OK: available={available}"
+                    + (f", missing={missing}" if missing else ""))
 
     def _get_next_key(self):
         if not self.keys:

@@ -4,6 +4,38 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [1.7.1] - 2026-09-05
+
+### 🔄 Changed (migrasi model Gemini)
+- **`gemini-2.5-flash` deprecated** oleh Google (404 NOT_FOUND "no longer available to new users"). Konfigurasi dimigrasi ke `gemini-3.6-flash`:
+  - `config/settings.py`: default `GEMINI_MODEL` = `gemini-3.6-flash`; error 404 muncul karena proses lama masih memakai `.env` yang berisi `gemini-2.5-flash`.
+  - `.env`: `GEMINI_MODEL=gemini-3.6-flash`, `GEMINI_FALLBACK_MODELS=gemini-3.0-flash` — model deprecated tidak lagi ada di rantai fallback.
+  - `.env.example`: `GEMINI_FALLBACK_MODELS=gemini-3.0-flash` (hapus `gemini-2.5-flash`) agar `.env` baru yang disalin dari contoh tidak mengulang bug yang sama.
+- **Log rantai model saat startup (`services/gemini_client.py`)**: `GeminiClient.__init__` kini mencatat `Gemini model chain: [...]` sekali saat init — drift config model (mis. model deprecated) langsung terlihat di log, bukan hanya saat API menolak request.
+
+### ⚠️ Migration Notes
+- Bot yang sedang berjalan WAJIB di-restart agar memuat `.env` terkini; proses lama yang masih memakai `gemini-2.5-flash` tetap kena 404 sampai restart. Jika deploy di server/salinan lain, samakan nilai `GEMINI_MODEL` dan `GEMINI_FALLBACK_MODELS` di sana juga.
+
+---
+
+## [1.7.0] - 2026-09-04
+
+### ✨ Added (Hyperbrowser provider)
+- **`services/hyperbrowser_client.py` baru**: wrapper `AsyncHyperbrowser` (SDK 1.4.1) dengan return-shape sama persis seperti Browserless, reuse SSRF guard + sanitizer, screenshot parser defensif (base64/data-URL/URL/bytes). Terverifikasi live: key valid, fetch README 200 + 2803 char.
+- **Fallback provider**: `ToolExecutor._fetch_webpage/_screenshot_page` + slash `/screenshot` coba berurutan via `FETCH_PROVIDER` (`auto` default: hyperbrowser → browserless). `analyze_image` tetap Browserless.
+- **Config**: `HYPERBROWSER_API_KEY`, `FETCH_PROVIDER` (`config/settings.py`, `.env.example`, `requirements.txt: hyperbrowser>=1.4.0`).
+
+### 🐛 Fixed (jawaban basi/kosong)
+- **Auto-fetch URL (`handlers/message_handler.py`)**: URL di pesan di-fetch paralel (max 2, 4000 char/URL) dalam `gather` dan di-injeksi ke prompt sebagai sumber utama — URL baru tidak lagi dijawab dari RAG lama.
+- **Retry kosong**: hasil thinking-only dicoba sekali `generate` polos sebelum fallback; fallback tsundere hanya bila tetap kosong.
+- **Scraper JS**: Hyperbrowser `wait_for 5000` + `wait_until networkidle`, Browserless `waitFor 5000` (halaman `0 Total Staff` karena belum render).
+
+### ⚡ Performance (timeout + I/O)
+- **Timeout berlapis**: `generate_with_tools` 45s → retry 60s dengan history 20→8; `synthesize`/retry/`/ask` 45s (`handlers/message_handler.py`, `cogs/slash_commands.py`).
+- **File I/O non-blocking**: `AuditLogger.aget_recent_logs/aget_logs_by_type`, `RagStore` save/clean/read + `aget_all` via `to_thread`; caller tool + `/deleted`/`/audit`/`/recall` diupdate.
+
+---
+
 ## [1.6.2] - 2026-09-04
 
 ### 🐛 Fixed (Browserless auth)
