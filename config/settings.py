@@ -5,6 +5,20 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+def _safe_int(val, default):
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_float(val, default):
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return default
+
+
 class Settings:
     BASE_DIR = Path(__file__).resolve().parent.parent
     DATA_DIR = BASE_DIR / "data"
@@ -38,21 +52,21 @@ class Settings:
     # hyperbrowser | browserless | auto (default: hyperbrowser dulu, fallback browserless)
     FETCH_PROVIDER = os.getenv("FETCH_PROVIDER", "auto").lower()
 
-    COMPACTION_THRESHOLD = float(os.getenv("COMPACTION_THRESHOLD", "0.80"))
-    COMPACTION_TARGET = float(os.getenv("COMPACTION_TARGET", "0.20"))
+    COMPACTION_THRESHOLD = _safe_float(os.getenv("COMPACTION_THRESHOLD"), 0.80)
+    COMPACTION_TARGET = _safe_float(os.getenv("COMPACTION_TARGET"), 0.20)
 
     NUGGETS_TTL_DAYS = int(os.getenv("NUGGETS_TTL_DAYS", "3"))
     NUGGETS_TOP_K = int(os.getenv("NUGGETS_TOP_K", "5"))
 
-    BOT_PREFIXES = [p.strip() for p in os.getenv("BOT_PREFIX", "").split(",") if p.strip()]
+    BOT_PREFIXES = [p.strip() for p in os.getenv("BOT_PREFIX", "").split(",") if p.strip() and p.strip() not in (",",)]
 
     BOT_REPLY_MENTION = os.getenv("BOT_REPLY_MENTION", "true").lower() == "true"
     PROCESS_REPLY_WITHOUT_MENTION = os.getenv("PROCESS_REPLY_WITHOUT_MENTION", "false").lower() == "true"
 
-    SESSION_TIMEOUT = int(os.getenv("SESSION_TIMEOUT", "3600"))
+    SESSION_TIMEOUT = _safe_int(os.getenv("SESSION_TIMEOUT"), 3600)
 
     WELCOME_ENABLED = os.getenv("WELCOME_ENABLED", "false").lower() == "true"
-    WELCOME_CHANNEL_ID = int(os.getenv("WELCOME_CHANNEL_ID", "0"))
+    WELCOME_CHANNEL_ID = _safe_int(os.getenv("WELCOME_CHANNEL_ID"), 0)
 
     BACKUP_ENABLED = os.getenv("BACKUP_ENABLED", "false").lower() == "true"
     # Kanonis: GITHUB_BACKUP_REPO. Terima alias lama GITHUB_REPO agar tidak breaking.

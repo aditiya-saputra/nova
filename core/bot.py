@@ -1,5 +1,6 @@
 import json
 import discord
+from pathlib import Path
 from discord.ext import commands
 from config.settings import Settings
 from core.event_handler import setup_event_handlers
@@ -18,7 +19,8 @@ def create_bot():
     if settings.BOT_PREFIXES:
         prefixes = settings.BOT_PREFIXES
     else:
-        with open("config/prefixes.json", encoding="utf-8") as f:
+        prefix_path = Path(__file__).resolve().parent.parent / "config" / "prefixes.json"
+        with open(prefix_path, encoding="utf-8") as f:
             prefix_data = json.load(f)
             prefixes = prefix_data["prefixes"]
 

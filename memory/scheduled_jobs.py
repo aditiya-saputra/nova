@@ -83,7 +83,11 @@ class ScheduledJobs:
                                     kept_records.append(record)
                                 else:
                                     deleted_count += 1
-                            except (json.JSONDecodeError, KeyError, ValueError, TypeError):
+                            except json.JSONDecodeError:
+                                # Line is not valid JSON — keep it as-is to avoid data loss
+                                kept_records.append({"_raw": line.strip()})
+                            except (KeyError, ValueError, TypeError):
+                                # Parsed but invalid timestamp — keep the record
                                 kept_records.append(record)
 
                     if deleted_count > 0:

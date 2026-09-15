@@ -1,4 +1,5 @@
 import json
+import re
 import uuid
 import asyncio
 import hashlib
@@ -24,10 +25,17 @@ class RagStore:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.base_dir = settings.MEMORIES_DIR
-        self._lock = asyncio.Lock()
+        self._channel_locks: dict[str, asyncio.Lock] = {}
+
+    def _get_lock(self, channel_id) -> asyncio.Lock:
+        key = str(channel_id)
+        if key not in self._channel_locks:
+            self._channel_locks[key] = asyncio.Lock()
+        return self._channel_locks[key]
 
     def _get_file_path(self, channel_id):
-        return self.base_dir / f"channel_{channel_id}.jsonl"
+        safe_id = re.sub(r'[^a-zA-Z0-9_-]', '_', str(channel_id))
+        return self.base_dir / f"channel_{safe_id}.jsonl"
 
     def load(self, channel_id):
         nuggets = []
@@ -45,7 +53,7 @@ class RagStore:
         return nuggets
 
     async def save(self, channel_id, nugget):
-        async with self._lock:
+        async with self._get_lock(channel_id):
             existing = await asyncio.to_thread(self.load, channel_id)
             new_hash = _fact_hash(nugget.get("fact", ""))
             for old in existing[-DEDUP_SCAN_LINES:]:
@@ -77,7 +85,7 @@ class RagStore:
         return await asyncio.to_thread(self.load, channel_id)
 
     async def clean_expired(self, channel_id):
-        async with self._lock:
+        async with self._get_lock(channel_id):
             nuggets = await asyncio.to_thread(self.load, channel_id)
             now = datetime.now(timezone.utc)
             valid = []
@@ -130,6 +138,6 @@ class RagStore:
 
     async def delete_channel(self, channel_id):
         """Hapus semua nugget memori untuk satu channel (file JSONL dihapus)."""
-        async with self._lock:
+        async with self._get_lock(channel_id):
             path = self._get_file_path(channel_id)
             await asyncio.to_thread(self._delete_file, path)

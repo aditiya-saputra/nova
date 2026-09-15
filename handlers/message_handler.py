@@ -7,6 +7,7 @@ from utils.logger import get_logger
 from utils.rich_presenter import rich
 from handlers.message_cache import MessageCache
 from handlers.attachment_processor import AttachmentProcessor
+from handlers.file_processor import FileProcessor
 from handlers.fact_extractor import FactExtractor
 
 logger = get_logger(__name__)
@@ -46,7 +47,7 @@ def _to_gemini_history(session_history):
     for msg in session_history[-HISTORY_BUDGET:]:
         role = msg.get("role")
         content = msg.get("content", "")
-        if role not in ("user", "model", "system"):
+        if role not in ("user", "model"):
             continue
         out.append({"role": role, "parts": [{"text": content}]})
     return out
@@ -68,6 +69,7 @@ class MessageHandler:
         audit_logger,
         github_backup,
         mention_store,
+        file_processor=None,
     ):
         self.bot = bot
         self.settings = settings
@@ -82,11 +84,14 @@ class MessageHandler:
         self.audit_logger = audit_logger
         self.github_backup = github_backup
         self.mention_store = mention_store
+        self.file_processor = file_processor or FileProcessor()
         self.cache = MessageCache()
         self.attachments = AttachmentProcessor(gemini)
         self.fact_extractor = FactExtractor(groq, rag_store, audit_logger)
         self._last_tool_calls = {}
         self._last_response_text = {}
+        self._last_tool_result_fp = {}
+        self._MAX_CHANNEL_TRACKERS = 200
 
     def cache_message(self, message):
         if message.author.bot:
@@ -122,6 +127,7 @@ class MessageHandler:
 
         urls = URL_PATTERN.findall(content) if content else []
         image_attachments = self.attachments.extract_image_attachments(message)
+        file_attachments = self.file_processor.extract_file_attachments(message)
 
         metadata = self.bot.router.extract_metadata(message, trigger_type)
         if urls:
@@ -130,6 +136,10 @@ class MessageHandler:
         if image_attachments:
             metadata["has_images"] = True
             metadata["image_count"] = len(image_attachments)
+        if file_attachments:
+            metadata["has_files"] = True
+            metadata["file_count"] = len(file_attachments)
+            metadata["file_names"] = [f["filename"] for f in file_attachments]
 
         channel_key = f"channel_{message.channel.id}"
         user_id = message.author.id
@@ -145,22 +155,36 @@ class MessageHandler:
         response = ""
 
         async with message.channel.typing():
-            # #1: Paralelkan I/O independen (VLM + RAG + compaction + URL fetch) via gather.
-            image_analyses, relevant_facts, _, url_contexts = await asyncio.gather(
+            # #1: Paralelkan I/O independen (VLM + RAG + compaction + URL fetch + file read) via gather.
+            image_analyses, relevant_facts, _, url_contexts, file_contents = await asyncio.gather(
                 self.attachments.analyze(
                     image_attachments, content or "Deskripsikan gambar ini secara detail."
                 ),
                 self._retrieve_facts(content, message.channel.id),
                 self.compaction_engine.check_and_compact(channel_key, user_id),
                 self._fetch_url_contexts(urls),
+                self.file_processor.read_attachments(file_attachments),
             )
 
             self.session_manager.add_message(channel_key, "user", content)
             await self.history_store.aappend_message(channel_key, user_id, "user", content)
 
+            # Cache file contents untuk read_attachment tool
+            if file_contents:
+                cache_key = f"{message.channel.id}_{message.id}"
+                if not hasattr(self.bot, "_file_attachment_cache"):
+                    self.bot._file_attachment_cache = {}
+                self.bot._file_attachment_cache[cache_key] = file_contents
+                # Cleanup cache lama (> 100 entries)
+                cache = self.bot._file_attachment_cache
+                if len(cache) > 100:
+                    oldest_keys = list(cache.keys())[:50]
+                    for k in oldest_keys:
+                        del cache[k]
+
             try:
                 system_prompt = self.context_builder.build_system_prompt(metadata, relevant_facts)
-                final_prompt = self._build_final_prompt(content, image_analyses, url_contexts)
+                final_prompt = self._build_final_prompt(content, image_analyses, url_contexts, file_contents)
                 tools = self.tool_executor.get_tools_for_gemini()
                 history = _to_gemini_history(self.session_manager.get_history(channel_key)[:-1])
 
@@ -183,57 +207,66 @@ class MessageHandler:
                     except asyncio.TimeoutError:
                         raise TimeoutError(f"Gemini generate_with_tools timeout ({GEMINI_TIMEOUT}s+{GEMINI_RETRY_TIMEOUT}s)")
 
-                if gemini_response.get("type") == "tool_call":
-                    tool_name = gemini_response.get("tool")
-                    tool_args = gemini_response.get("args", {})
-                    logger.info(f"Gemini selected tool: {tool_name}")
-
-                    # #2: audit tool_call jangan block eksekusi tool.
-                    _spawn(self.audit_logger.log("tool_call", {
-                        "user_id": user_id,
-                        "user_name": message.author.display_name,
-                        "channel_id": message.channel.id,
-                        "tool_name": tool_name,
-                        "tool_args": tool_args,
-                    }), "tool_call")
+                if gemini_response.get("type") == "tool_calls":
+                    # Parallel + Compositional function calling
+                    tool_calls = gemini_response.get("calls", [])
+                    function_call_content = gemini_response.get("function_call_content")
+                    user_content = gemini_response.get("user_content")
+                    initial_thought_signatures = gemini_response.get("thought_signatures", [])
+                    logger.info(f"Gemini requested {len(tool_calls)} tool call(s): "
+                                f"{[tc['tool'] for tc in tool_calls]}")
 
                     last_assistant = self._last_response_text.get(channel_key, "")
 
-                    if self._should_skip_repeated_tool(channel_key, tool_name, tool_args, content):
-                        logger.info(
-                            f"Skipping repeated {tool_name} call (short follow-up), "
-                            "answering conversationally"
-                        )
-                        response = await asyncio.wait_for(self.gemini.generate(
-                            self._build_reaction_prompt(content, last_assistant),
-                            system_instruction=system_prompt,
-                        ), timeout=GEMINI_TIMEOUT)
-                    else:
-                        self._last_tool_calls[channel_key] = {
-                            "tool": tool_name, "args": tool_args,
-                        }
-                        tool_result = await self.tool_executor.execute(
-                            tool_name, tool_args,
-                            channel_id=message.channel.id,
-                            user_id=user_id,
-                        )
-
-                        # #2: audit tool_result jangan block synthesize.
-                        _spawn(self.audit_logger.log("tool_result", {
+                    # Audit semua tool calls
+                    for tc in tool_calls:
+                        _spawn(self.audit_logger.log("tool_call", {
                             "user_id": user_id,
+                            "user_name": message.author.display_name,
                             "channel_id": message.channel.id,
-                            "tool_name": tool_name,
-                            "result_length": len(str(tool_result)),
-                            "success": not str(tool_result).startswith("Error"),
-                        }), "tool_result")
+                            "tool_name": tc["tool"],
+                            "tool_args": tc["args"],
+                        }), "tool_call")
 
-                        try:
-                            response = await asyncio.wait_for(self.gemini.synthesize_with_tool_result(
-                                final_prompt, tool_result, system_instruction=system_prompt,
+                    # Anti-repeat check: skip bila tool call identik dengan turn sebelumnya
+                    if len(tool_calls) == 1:
+                        tc = tool_calls[0]
+                        if self._should_skip_repeated_tool(channel_key, tc["tool"], tc["args"], content):
+                            if len((content or "").strip()) <= SHORT_REACTION_MAX:
+                                # Case 1: reaksi singkat → conversational reply
+                                logger.info(f"Skipping repeated {tc['tool']} call (short follow-up)")
+                                response = await asyncio.wait_for(self.gemini.generate(
+                                    self._build_reaction_prompt(content, last_assistant),
+                                    system_instruction=system_prompt,
+                                ), timeout=GEMINI_TIMEOUT)
+                            else:
+                                response = await self._handle_tool_calls(
+                                    tool_calls, tools, final_prompt, system_prompt,
+                                    channel_key, user_id, message, content,
+                                    user_content=user_content,
+                                    function_call_content=function_call_content,
+                                    thought_signatures=initial_thought_signatures,
+                                    last_assistant=last_assistant,
+                                )
+                        else:
+                            response = await self._handle_tool_calls(
+                                tool_calls, tools, final_prompt, system_prompt,
+                                channel_key, user_id, message, content,
+                                user_content=user_content,
+                                function_call_content=function_call_content,
+                                thought_signatures=initial_thought_signatures,
                                 last_assistant=last_assistant,
-                            ), timeout=GEMINI_TIMEOUT)
-                        except asyncio.TimeoutError:
-                            raise TimeoutError(f"Gemini synthesize timeout ({GEMINI_TIMEOUT}s)")
+                            )
+                    else:
+                        response = await self._handle_tool_calls(
+                            tool_calls, tools, final_prompt, system_prompt,
+                            channel_key, user_id, message, content,
+                            user_content=user_content,
+                            function_call_content=function_call_content,
+                            thought_signatures=initial_thought_signatures,
+                            last_assistant=last_assistant,
+                        )
+
                 else:
                     response = gemini_response.get("text", "")
 
@@ -271,10 +304,20 @@ class MessageHandler:
             self._last_response_text[channel_key] = response
 
         # Reply dulu agar user tidak nunggu audit/RAG/backup.
-        if self.settings.BOT_REPLY_MENTION:
-            await message.reply(response, mention_author=True)
-        else:
-            await message.channel.send(response)
+        # Discord limit: 2000 chars — split jika lebih panjang.
+        DISCORD_LIMIT = 2000
+        if response and len(response) > DISCORD_LIMIT:
+            chunks = [response[i:i + DISCORD_LIMIT] for i in range(0, len(response), DISCORD_LIMIT)]
+            for i, chunk in enumerate(chunks):
+                if self.settings.BOT_REPLY_MENTION and i == 0:
+                    await message.reply(chunk, mention_author=True)
+                else:
+                    await message.channel.send(chunk)
+        elif response:
+            if self.settings.BOT_REPLY_MENTION:
+                await message.reply(response, mention_author=True)
+            else:
+                await message.channel.send(response)
 
         # #2: non-kritis jadi background (tidak block return handle).
         _spawn(self.audit_logger.log_response(
@@ -307,6 +350,135 @@ class MessageHandler:
         # NOTE: process_commands dipanggil di main.py on_message (finally),
         # bukan di sini, agar pesan command tetap diproses walau AI skip.
 
+    async def _handle_tool_calls(self, tool_calls, tools, final_prompt, system_prompt,
+                                 channel_key, user_id, message, content,
+                                 user_content=None, function_call_content=None,
+                                  thought_signatures=None, last_assistant=""):
+        """Execute tool calls (parallel), run compositional loop, return final text.
+
+        Handles:
+        - Parallel: multiple tool_calls in a single Gemini response → execute all concurrently
+        - Compositional: tool result may trigger more tool calls (chain)
+        - Fallback: synthesize from last tool_results if loop ends without text
+        """
+        MAX_TOOL_ROUNDS = 5
+        if thought_signatures is None:
+            thought_signatures = []
+
+        async def _exec_tool(tc):
+            return await self.tool_executor.execute(
+                tc["tool"], tc["args"],
+                channel_id=message.channel.id,
+                user_id=user_id,
+            )
+
+        # Execute initial tool calls concurrently
+        try:
+            raw_results = await asyncio.wait_for(
+                asyncio.gather(*[_exec_tool(tc) for tc in tool_calls]),
+                timeout=GEMINI_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            raise TimeoutError(f"Tool execution timeout ({GEMINI_TIMEOUT}s)")
+
+        tool_results = []
+        for tc, result in zip(tool_calls, raw_results):
+            tool_results.append({"tool": tc["tool"], "args": tc["args"], "result": result})
+            _spawn(self.audit_logger.log("tool_result", {
+                "user_id": user_id,
+                "channel_id": message.channel.id,
+                "tool_name": tc["tool"],
+                "result_length": len(str(result)),
+                "success": not str(result).startswith("Error"),
+            }), "tool_result")
+            self._last_tool_calls[channel_key] = {"tool": tc["tool"], "args": tc["args"]}
+            self._last_tool_result_fp[channel_key] = {
+                "tool": tc["tool"],
+                "args_fp": self._normalize_args(tc["args"]),
+                "result": result,
+                "ts": time.time(),
+            }
+            self._evict_trackers_if_needed()
+
+        # Compositional function calling loop:
+        # Send tool results back to Gemini — may request more tools (chain)
+        # or return text response.
+        response = ""
+
+        for tool_round in range(MAX_TOOL_ROUNDS):
+            try:
+                next_resp = await asyncio.wait_for(
+                    self.gemini.generate_with_tool_results(
+                        tool_results, tools,
+                        system_instruction=system_prompt,
+                        user_content=user_content,
+                        function_call_content=function_call_content,
+                        thought_signatures=thought_signatures,
+                    ),
+                    timeout=GEMINI_TIMEOUT,
+                )
+                # Update conversation state for next round
+                function_call_content = next_resp.get("function_call_content")
+                thought_signatures = next_resp.get("thought_signatures", [])
+                # user_content stays the same across rounds
+            except asyncio.TimeoutError:
+                logger.warning(f"Compositional round {tool_round} timeout, synthesizing")
+                break
+
+            if next_resp.get("type") == "text":
+                response = next_resp.get("text", "")
+                break
+
+            if next_resp.get("type") == "tool_calls":
+                more_calls = next_resp.get("calls", [])
+                if not more_calls:
+                    break
+                logger.info(f"Compositional round {tool_round + 1}: "
+                            f"{len(more_calls)} more tool call(s)")
+
+                for tc in more_calls:
+                    _spawn(self.audit_logger.log("tool_call", {
+                        "user_id": user_id,
+                        "user_name": message.author.display_name,
+                        "channel_id": message.channel.id,
+                        "tool_name": tc["tool"],
+                        "tool_args": tc["args"],
+                    }), "tool_call")
+
+                try:
+                    more_raw = await asyncio.wait_for(
+                        asyncio.gather(*[_exec_tool(tc) for tc in more_calls]),
+                        timeout=GEMINI_TIMEOUT,
+                    )
+                except asyncio.TimeoutError:
+                    raise TimeoutError(f"Compositional tool timeout ({GEMINI_TIMEOUT}s)")
+
+                tool_results = []
+                for tc, result in zip(more_calls, more_raw):
+                    tool_results.append({"tool": tc["tool"], "args": tc["args"], "result": result})
+                    _spawn(self.audit_logger.log("tool_result", {
+                        "user_id": user_id,
+                        "channel_id": message.channel.id,
+                        "tool_name": tc["tool"],
+                        "result_length": len(str(result)),
+                        "success": not str(result).startswith("Error"),
+                    }), "tool_result")
+
+        # Fallback: loop ended without text response → synthesize from last tool_results
+        if not (response or "").strip() and tool_results:
+            try:
+                response = await asyncio.wait_for(
+                    self.gemini.synthesize_with_tool_results(
+                        final_prompt, tool_results, system_instruction=system_prompt,
+                        last_assistant=last_assistant,
+                    ),
+                    timeout=GEMINI_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                raise TimeoutError(f"Gemini synthesize timeout ({GEMINI_TIMEOUT}s)")
+
+        return response
+
     async def _backup_and_log(self):
         ok = await self.github_backup.backup("message_threshold")
         if ok:
@@ -321,33 +493,37 @@ class MessageHandler:
             return []
 
     async def _fetch_url_contexts(self, urls):
-        """Auto-fetch URL di pesan (max MAX_AUTO_URLS) via ToolExecutor fallback.
+        """Auto-fetch URL di pesan (max MAX_AUTO_URLS) via ToolExecutor.
 
         Hasil segar di-injeksi ke prompt agar jawaban tidak basi dari RAG lama.
         Return list[{url, title, content}]; [] bila tidak ada/gagal.
         """
         if not urls:
             return []
-        contexts = []
-        for url in urls[:MAX_AUTO_URLS]:
+
+        async def _fetch_one(url):
             try:
-                result = await self.tool_executor._fetch_webpage(url)
+                result = await self.tool_executor.execute("fetch_webpage", {"url": url})
                 if result.get("success") and (result.get("content") or "").strip():
                     text = result["content"][:URL_CONTEXT_CHARS]
-                    contexts.append({
+                    return {
                         "url": url,
                         "title": result.get("title", ""),
                         "content": text,
-                    })
+                    }
                 else:
                     logger.warning(f"Auto-fetch empty/failed for {url}: {result.get('error')}")
+                    return None
             except Exception as e:
                 logger.error(f"Auto-fetch error for {url}: {e}")
-        return contexts
+                return None
+
+        results = await asyncio.gather(*[_fetch_one(u) for u in urls[:MAX_AUTO_URLS]])
+        return [r for r in results if r]
 
     @staticmethod
-    def _build_final_prompt(content, image_analyses, url_contexts=None):
-        out = content or "User mengirim gambar/link tanpa teks."
+    def _build_final_prompt(content, image_analyses, url_contexts=None, file_contents=None):
+        out = content or "User mengirim gambar/link/file tanpa teks."
         if image_analyses:
             out += "\n\n[Image Attachments Analyzed by Nova VLM]:\n"
             for i, img in enumerate(image_analyses, 1):
@@ -356,6 +532,11 @@ class MessageHandler:
             out += "\n\n[Webpage Content Auto-Fetched — GUNAKAN INI sebagai sumber utama untuk URL di bawah, jangan jawab dari memori lama]:\n"
             for ctx in url_contexts:
                 out += f"\n--- URL: {ctx['url']} ---\nTitle: {ctx.get('title', '')}\n{ctx['content']}\n"
+        if file_contents:
+            out += "\n\n[Uploaded File Content — GUNAKAN INI sebagai referensi utama untuk menjawab tentang isi file]:\n"
+            for fc in file_contents:
+                trunc_note = " (truncated)" if fc.get("truncated") else ""
+                out += f"\n--- File: {fc['filename']}{trunc_note} ({fc['size']} bytes) ---\n{fc['content']}\n--- End: {fc['filename']} ---\n"
         return out
 
     @staticmethod
@@ -366,20 +547,41 @@ class MessageHandler:
             return str(args)
 
     def _should_skip_repeated_tool(self, channel_key, tool_name, tool_args, content):
-        """Anti-repeat: tool yang sama + args sama + follow-up singkat → jangan re-run.
+        """Anti-repeat: skip tool execution kalau tool+args sama dengan turn sebelumnya.
 
-        Follow-up pendek biasanya reaksi/konfirmasi ("dih ada aku ternyata",
-        "oke cukup 2M sih"), bukan pertanyaan baru — re-run tool cuma melahirkan
-        laporan yang sama persis.
+        Trigger jika:
+        1. Tool + args IDENTIK + content <= 24 chars (reaksi singkat) — ORIGINAL
+        2. Tool + args IDENTIK + tool_result terakhir IDENTIK + cached < 5 menit —
+           data tidak berubah, re-run sia-sia dan synthesize akan hasilkan output mirip/sama.
         """
         prev = self._last_tool_calls.get(channel_key)
         if not prev:
             return False
         if tool_name != prev.get("tool"):
             return False
-        if self._normalize_args(tool_args) != self._normalize_args(prev.get("args", {})):
+        args_match = self._normalize_args(tool_args) == self._normalize_args(prev.get("args", {}))
+        if not args_match:
             return False
-        return len((content or "").strip()) <= SHORT_REACTION_MAX
+        # Case 1: reaksi singkat — langsung skip
+        if len((content or "").strip()) <= SHORT_REACTION_MAX:
+            return True
+        # Case 2: args sama + result fingerprint sama + belum stale — skip, pakai cached
+        prev_fp = self._last_tool_result_fp.get(channel_key, {})
+        if (
+            prev_fp.get("tool") == tool_name
+            and prev_fp.get("args_fp") == self._normalize_args(tool_args)
+            and prev_fp.get("result") is not None
+            and (time.time() - prev_fp.get("ts", 0)) < 300  # < 5 menit
+        ):
+            return True
+        return False
+
+    def _evict_trackers_if_needed(self):
+        for d in (self._last_tool_calls, self._last_response_text, self._last_tool_result_fp):
+            if len(d) > self._MAX_CHANNEL_TRACKERS:
+                keys = list(d.keys())[:len(d) - self._MAX_CHANNEL_TRACKERS // 2]
+                for k in keys:
+                    d.pop(k, None)
 
     @staticmethod
     def _build_reaction_prompt(content, last_assistant):

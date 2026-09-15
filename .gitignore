@@ -1,10 +1,48 @@
+# Environment & secrets
 .env
 .env.*
 !.env.example
 secrets/
+
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Type checkers
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Data (runtime, user-specific)
 data/
+
+# Logs
 *.log
+logs/
+
+# IDE
 .vscode/
 .idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Archives
+*.tar.gz
+*.zip
+*.rar
+*.7z
+
+# Project-specific
+opencode.json

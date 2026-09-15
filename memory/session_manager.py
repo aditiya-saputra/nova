@@ -9,6 +9,8 @@ logger = get_logger(__name__)
 
 
 class SessionManager:
+    MAX_SESSIONS = 500
+
     def __init__(self, settings: Settings, history_store: HistoryStore = None):
         self.settings = settings
         self.history_store = history_store
@@ -52,6 +54,7 @@ class SessionManager:
         })
         self.token_counts[key] += tokens
         self.last_activity[key] = time.time()
+        self._evict_if_needed()
 
     def get_history(self, key):
         self.hydrate_from_disk(key)
@@ -112,3 +115,15 @@ class SessionManager:
 
     def get_user_key(self, user_id):
         return f"user_{user_id}"
+
+    def _evict_if_needed(self):
+        if len(self.sessions) <= self.MAX_SESSIONS:
+            return
+        # Evict oldest half by last_activity
+        sorted_keys = sorted(self.last_activity, key=self.last_activity.get)
+        evict_count = len(self.sessions) - self.MAX_SESSIONS // 2
+        for key in sorted_keys[:evict_count]:
+            self.sessions.pop(key, None)
+            self.token_counts.pop(key, None)
+            self.last_activity.pop(key, None)
+            self._hydrated_keys.discard(key)

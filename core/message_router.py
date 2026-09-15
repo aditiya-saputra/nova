@@ -1,14 +1,45 @@
+import re
 import discord
 from utils.logger import get_logger
 from utils.time_utils import to_wib_iso
 
 logger = get_logger(__name__)
 
+# Pola regex untuk mention Discord:
+# - Role mention: <@&ROLE_ID>
+# - User mention: <@USER_ID> atau <@!USER_ID>
+ROLE_MENTION_RE = re.compile(r'<@&\d+>')
+EVERYONE_MENTION_RE = re.compile(r'@(everyone|here)\b')
+
 
 class MessageRouter:
     def __init__(self, bot, settings):
         self.bot = bot
         self.settings = settings
+
+    def _strip_all_mentions(self, content):
+        """Hapus semua mention Discord: bot, role, @everyone, @here.
+
+        Return konten yang sudah bersih dari semua jenis mention.
+        Berguna untuk menentukan apakah pesan hanya berisi mention tanpa konten bermakna.
+        """
+        # Hapus mention bot (user ID)
+        content = content.replace(f"<@{self.bot.user.id}>", "")
+        content = content.replace(f"<@!{self.bot.user.id}>", "")
+        # Hapus role mention: <@&ROLE_ID>
+        content = ROLE_MENTION_RE.sub("", content)
+        # Hapus @everyone dan @here
+        content = EVERYONE_MENTION_RE.sub("", content)
+        return content.strip()
+
+    def _is_only_mention_content(self, message):
+        """Cek apakah pesan HANYA berisi mention (bot, role, @everyone, @here) tanpa konten bermakna.
+
+        Return True jika setelah semua mention dihapus, tidak ada sisa teks bermakna.
+        """
+        content = message.content or ""
+        cleaned = self._strip_all_mentions(content)
+        return not cleaned
 
     def detect_trigger(self, message):
         if message.author.bot:
@@ -30,7 +61,10 @@ class MessageRouter:
                 return "prefix_command"
 
         if self.bot.user.mentioned_in(message):
-            clean = content.replace(f"<@{self.bot.user.id}>", "").replace(f"<@!{self.bot.user.id}>", "").strip()
+            # #ignore-role-mention: bersihkan role mention + @everyone/@here juga
+            # agar pesan seperti "@Nova @everyone" tetap diproses, tapi "@everyone @role"
+            # tanpa konten bermakna lainnya tidak memicu trigger.
+            clean = self._strip_all_mentions(content)
             if clean:
                 return "direct_mention"
 
@@ -90,12 +124,12 @@ class MessageRouter:
                     return content[len(prefix):].strip()
 
         elif trigger_type == "direct_mention":
-            content = content.replace(f"<@{self.bot.user.id}>", "").replace(f"<@!{self.bot.user.id}>", "")
-            return content.strip()
+            # #ignore-role-mention: bersihkan semua mention (bot + role + @everyone/@here)
+            return self._strip_all_mentions(content)
 
         elif trigger_type == "reply_to_bot":
-            content = content.replace(f"<@{self.bot.user.id}>", "").replace(f"<@!{self.bot.user.id}>", "")
-            return content.strip()
+            # #ignore-role-mention: bersihkan semua mention (bot + role + @everyone/@here)
+            return self._strip_all_mentions(content)
 
         return content
 

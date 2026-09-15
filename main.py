@@ -17,6 +17,7 @@ from memory.scheduled_jobs import ScheduledJobs
 from memory.mention_store import MentionStore
 from core.context_builder import ContextBuilder
 from handlers.message_handler import MessageHandler
+from handlers.file_processor import FileProcessor
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -51,6 +52,7 @@ async def main():
         settings, session_manager, history_store, groq, context_builder, audit_logger
     )
     tool_executor = ToolExecutor(bot)
+    file_processor = FileProcessor()
 
     for name, obj in {
         "gemini": gemini, "groq": groq, "tavily": tavily, "browserless": browserless,
@@ -59,7 +61,7 @@ async def main():
         "rag_store": rag_store, "context_builder": context_builder,
         "audit_logger": audit_logger, "github_backup": github_backup,
         "mention_store": mention_store, "compaction_engine": compaction_engine,
-        "tool_executor": tool_executor,
+        "tool_executor": tool_executor, "file_processor": file_processor,
     }.items():
         setattr(bot, name, obj)
 
@@ -73,6 +75,7 @@ async def main():
         bot, settings, gemini, groq, rag_store, history_store,
         session_manager, context_builder, tool_executor,
         compaction_engine, audit_logger, github_backup, mention_store,
+        file_processor=file_processor,
     )
     bot.message_handler = message_handler
 
@@ -81,7 +84,10 @@ async def main():
     logger.info("Slash commands loaded!")
 
     if github_backup.backup_enabled:
-        github_backup.init_repo()
+        try:
+            github_backup.init_repo()
+        except Exception:
+            logger.exception("GitHub backup init failed — backup disabled for this session")
 
     await scheduled_jobs.start()
 
@@ -92,36 +98,36 @@ async def main():
             return
         try:
             await message_handler.handle(message)
-        except Exception as e:
-            logger.error(f"Unhandled on_message error: {e}")
+        except Exception:
+            logger.exception("Unhandled on_message error")
         finally:
             # Selalu teruskan ke command processor (discord.py best practice).
             # AI handler sudah skip pesan command via is_bot_command, jadi aman.
             try:
                 await bot.process_commands(message)
-            except Exception as e:
-                logger.error(f"process_commands error: {e}")
+            except Exception:
+                logger.exception("process_commands error")
 
     @bot.event
     async def on_message_delete(message):
         try:
             await message_handler.handle_delete(message)
-        except Exception as e:
-            logger.error(f"Unhandled on_message_delete error: {e}")
+        except Exception:
+            logger.exception("Unhandled on_message_delete error")
 
     @bot.event
     async def on_message_edit(before, after):
         try:
             await message_handler.handle_edit(before, after)
-        except Exception as e:
-            logger.error(f"Unhandled on_message_edit error: {e}")
+        except Exception:
+            logger.exception("Unhandled on_message_edit error")
 
     @bot.event
     async def on_presence_update(before, after):
         try:
             await message_handler.handle_presence(before, after)
-        except Exception as e:
-            logger.error(f"Unhandled on_presence_update error: {e}")
+        except Exception:
+            logger.exception("Unhandled on_presence_update error")
 
     try:
         await bot.start(settings.DISCORD_TOKEN)
@@ -160,6 +166,12 @@ async def main():
             att = getattr(getattr(bot, "message_handler", None), "attachments", None)
             if att is not None and hasattr(att, "aclose"):
                 await att.aclose()
+        except Exception:
+            pass
+        try:
+            fp = getattr(bot, "file_processor", None)
+            if fp is not None and hasattr(fp, "aclose"):
+                await fp.aclose()
         except Exception:
             pass
         if not bot.is_closed():

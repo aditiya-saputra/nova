@@ -28,9 +28,13 @@ class CompactionEngine:
             if len(history) < 2:
                 return False
 
-            system_prompt = self.context_builder.build_compaction_prompt(history)
-            # GroqClient kini async (AsyncGroq) — await langsung, jangan block loop.
-            summary = await self.groq_client.compact(history, system_prompt)
+            try:
+                system_prompt = self.context_builder.build_compaction_prompt(history)
+                # GroqClient kini async (AsyncGroq) — await langsung, jangan block loop.
+                summary = await self.groq_client.compact(history, system_prompt)
+            except Exception as e:
+                logger.error(f"Compaction Groq failed for {key}: {e}")
+                return False
 
             self.session_manager.replace_history(key, summary)
 

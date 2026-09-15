@@ -145,12 +145,11 @@ class GeminiClient:
         last_error = None
         primary_model = self.model_chain[0] if self.model_chain else self.model_name
         for model in self.model_chain:
-            self.model_name = model
             logger.info(f"Trying model: {model}")
             for attempt in range(len(self.keys)):
                 api_key = self._get_next_key()
                 try:
-                    result = await fn(api_key)
+                    result = await fn(api_key, model)
                     if model != primary_model:
                         logger.info(f"Switched to model: {model} (fallback from {primary_model})")
                     return result
@@ -170,20 +169,20 @@ class GeminiClient:
         raise last_error
 
     async def generate(self, prompt, system_instruction=None, history=None):
-        async def _call(api_key):
+        async def _call(api_key, model):
             client = self._get_client(api_key)
             config = self._build_config(system_instruction)
-            logger.info(f"Generating with model: {self.model_name}")
+            logger.info(f"Generating with model: {model}")
             if history:
                 chat = client.aio.chats.create(
-                    model=self.model_name,
+                    model=model,
                     history=history,
                     config=config
                 )
                 response = await chat.send_message(prompt)
             else:
                 response = await client.aio.models.generate_content(
-                    model=self.model_name,
+                    model=model,
                     contents=prompt,
                     config=config
                 )
@@ -192,11 +191,11 @@ class GeminiClient:
         return await self._run_with_fallback(_call, "generate")
 
     async def chat(self, messages, system_instruction=None):
-        async def _call(api_key):
+        async def _call(api_key, model):
             client = self._get_client(api_key)
             config = self._build_config(system_instruction)
             chat = client.aio.chats.create(
-                model=self.model_name,
+                model=model,
                 config=config
             )
             return chat
@@ -204,6 +203,16 @@ class GeminiClient:
         return await self._run_with_fallback(_call, "chat")
 
     async def generate_with_tools(self, prompt, tools, system_instruction=None, history=None):
+        """Generate with tool declarations. Returns tool_calls list or text response.
+
+        Supports parallel function calling: Gemini can return multiple tool calls
+        in a single response. Returns:
+            {"type": "tool_calls", "calls": [...], "function_call_content": Content, "user_content": Content}
+            {"type": "text", "text": "..."}
+
+        The "function_call_content" and "user_content" keys preserve conversation state
+        for compositional function calling.
+        """
         flat_tools = []
         for t in tools:
             flat_tools.append(types.FunctionDeclaration(
@@ -216,58 +225,255 @@ class GeminiClient:
         config = types.GenerateContentConfig(
             temperature=0.7,
             max_output_tokens=self.settings.GEMINI_OUTPUT_LIMIT,
-            tools=[tool_declarations]
+            tools=[tool_declarations],
+            # Disable thinking untuk tool calling — thinking models butuh
+            # thought_signature yang tidak tersedia via models.generate_content.
+            thinking_config=types.ThinkingConfig(thinking_budget=0),
         )
         if system_instruction:
             config.system_instruction = system_instruction
 
-        async def _call(api_key):
+        # Build user content for conversation history
+        user_content = types.Content(
+            role="user",
+            parts=[types.Part.from_text(text=prompt)]
+        )
+
+        async def _call(api_key, model):
             client = self._get_client(api_key)
-            logger.info(f"Generating with tools: {self.model_name}")
-            # SDK anjurkan AFC via Chat.send_message, bukan Models.generate_content.
-            # Selalu pakai chat (history kosong bila tidak ada) agar tidak warning.
-            chat = client.aio.chats.create(
-                model=self.model_name,
-                history=history or [],
+            logger.info(f"Generating with tools: {model}")
+            response = await client.aio.models.generate_content(
+                model=model,
+                contents=prompt,
                 config=config
             )
-            response = await chat.send_message(prompt)
-            response_text = self._extract_response_text(response)
-            if response.candidates and response.candidates[0].content.parts:
-                for part in response.candidates[0].content.parts:
-                    if hasattr(part, 'function_call') and part.function_call:
-                        return {
-                            "type": "tool_call",
-                            "tool": part.function_call.name,
-                            "args": dict(part.function_call.args)
-                        }
-            return {"type": "text", "text": response_text}
+            result = self._parse_tool_response(response)
+
+            # Preserve conversation state for compositional loop
+            result["user_content"] = user_content
+            if response.candidates and response.candidates[0].content:
+                content_obj = response.candidates[0].content
+                result["function_call_content"] = content_obj
+                # Extract thought_signatures from function call parts for Gemini API v1
+                if result["type"] == "tool_calls":
+                    result["thought_signatures"] = self._extract_thought_signatures(content_obj)
+
+            return result
 
         return await self._run_with_fallback(_call, "generate_with_tools")
 
+    def _extract_thought_signatures(self, content):
+        """Extract thought_signature bytes from each Part in a Content object."""
+        signatures = []
+        if content and getattr(content, 'parts', None):
+            for part in content.parts:
+                ts = getattr(part, 'thought_signature', None)
+                signatures.append(ts if ts is not None else b'')
+        return signatures
+
+    def _rebuild_content_with_signatures(self, content, thought_signatures):
+        """Rebuild Content object with thought_signature attached to each Part."""
+        if not content or not getattr(content, 'parts', None):
+            return content
+        new_parts = []
+        for i, part in enumerate(content.parts):
+            ts = thought_signatures[i] if i < len(thought_signatures) else b''
+            if ts:
+                new_part = types.Part(
+                    text=part.text,
+                    function_call=part.function_call,
+                    thought_signature=ts,
+                )
+                new_parts.append(new_part)
+            else:
+                new_parts.append(part)
+        return types.Content(role=content.role, parts=new_parts)
+
+    def _build_contents_with_signatures(self, user_content, function_call_content, function_response_content, thought_signatures=None):
+        """Build contents array with proper thought_signature handling."""
+        contents = []
+        if user_content:
+            contents.append(user_content)
+        if function_call_content:
+            if thought_signatures:
+                rebuilt = self._rebuild_content_with_signatures(function_call_content, thought_signatures)
+                contents.append(rebuilt)
+            else:
+                contents.append(function_call_content)
+        if function_response_content:
+            contents.append(function_response_content)
+        return contents
+
+    def _parse_tool_response(self, response):
+        """Parse Gemini response into structured tool_calls or text.
+
+        Handles parallel function calling: returns ALL tool calls from a single
+        response as a list. Also extracts thought_signature from function call parts.
+        """
+        response_text = self._extract_response_text(response)
+        tool_calls = []
+        thought_signatures = []
+
+        if (response.candidates
+                and response.candidates[0].content
+                and response.candidates[0].content.parts):
+            for part in response.candidates[0].content.parts:
+                if hasattr(part, 'function_call') and part.function_call:
+                    tool_calls.append({
+                        "tool": part.function_call.name,
+                        "args": dict(part.function_call.args),
+                    })
+                    ts = getattr(part, 'thought_signature', None)
+                    thought_signatures.append(ts if ts is not None else b'')
+
+        result = {"type": "text", "text": response_text}
+        if tool_calls:
+            result = {"type": "tool_calls", "calls": tool_calls, "thought_signatures": thought_signatures}
+        return result
+
+    async def generate_with_tool_results(self, tool_results, tools, system_instruction=None,
+                                          user_content=None, function_call_content=None,
+                                          thought_signatures=None):
+        """Compositional function calling: send tool results back, get next response.
+
+        After executing tool(s), send results back to Gemini.
+        Gemini may return more tool calls (chain) or a final text response.
+
+        Format: [user_content, function_call_content, function_response_content]
+        (required by Gemini API — function call must follow user turn)
+
+        Args:
+            tool_results: list of {"tool": name, "args": {...}, "result": {...}}
+            tools: tool declarations for Gemini
+            system_instruction: system prompt
+            user_content: the original user Content from initial prompt
+            function_call_content: the function call Content from previous response
+            thought_signatures: list of thought_signature bytes for each function call part
+
+        Returns: same format as generate_with_tools
+        """
+        flat_tools = []
+        for t in tools:
+            flat_tools.append(types.FunctionDeclaration(
+                name=t["name"],
+                description=t["description"],
+                parameters_json_schema=t.get("parameters", {})
+            ))
+        tool_declarations = types.Tool(function_declarations=flat_tools)
+
+        config = types.GenerateContentConfig(
+            temperature=0.7,
+            max_output_tokens=self.settings.GEMINI_OUTPUT_LIMIT,
+            tools=[tool_declarations],
+            # Disable thinking untuk tool calling — thinking models butuh
+            # thought_signature yang tidak tersedia via models.generate_content.
+            thinking_config=types.ThinkingConfig(thinking_budget=0),
+        )
+        if system_instruction:
+            config.system_instruction = system_instruction
+
+        # Build function response content
+        function_response_parts = []
+        for tr in tool_results:
+            result_data = json.dumps(tr["result"], ensure_ascii=False) if isinstance(tr["result"], dict) else str(tr["result"])
+            function_response_parts.append(types.Part.from_function_response(
+                name=tr["tool"],
+                response=tr["result"] if isinstance(tr["result"], dict) else {"text": result_data},
+            ))
+
+        function_response_content = types.Content(
+            role="tool",
+            parts=function_response_parts
+        )
+
+        # Build full contents: user + function_call + function_response
+        # with proper thought_signature handling for Gemini API v1
+        contents = self._build_contents_with_signatures(
+            user_content, function_call_content, function_response_content,
+            thought_signatures or []
+        )
+
+        async def _call(api_key, model):
+            client = self._get_client(api_key)
+            logger.info(f"Compositional round: {model} ({len(tool_results)} results)")
+            response = await client.aio.models.generate_content(
+                model=model,
+                contents=contents,
+                config=config
+            )
+            result = self._parse_tool_response(response)
+            # Preserve conversation state for next round
+            result["user_content"] = user_content
+            result["thought_signatures"] = []
+            if response.candidates and response.candidates[0].content:
+                content_obj = response.candidates[0].content
+                result["function_call_content"] = content_obj
+                if result["type"] == "tool_calls":
+                    result["thought_signatures"] = self._extract_thought_signatures(content_obj)
+            return result
+
+        return await self._run_with_fallback(_call, "generate_with_tool_results")
+
     async def synthesize_with_tool_result(self, original_prompt, tool_result, system_instruction=None, last_assistant=None):
+        """Synthesize final answer from tool result (single tool).
+
+        Prompt ordering follows Gemini best practices:
+        - Tool result as context (main data source)
+        - User query at the END (docs: "query at end performs better")
+        - No last_assistant injection (causes model to fixate on previous output)
+        """
+        return await self._synthesize_multi(
+            original_prompt, [tool_result], system_instruction, last_assistant
+        )
+
+    async def synthesize_with_tool_results(self, original_prompt, tool_results, system_instruction=None, last_assistant=None):
+        """Synthesize final answer from multiple parallel tool results."""
+        results = [tr["result"] for tr in tool_results]
+        return await self._synthesize_multi(
+            original_prompt, results, system_instruction, last_assistant
+        )
+
+    async def _synthesize_multi(self, original_prompt, results, system_instruction=None, last_assistant=None):
+        """Shared synthesis logic with explicit anti-verbatim reference."""
         config = self._build_config(system_instruction)
-        prompt = f"""Original request: {original_prompt}
+
+        parts = []
+        for i, result in enumerate(results):
+            data = json.dumps(result, indent=2, ensure_ascii=False) if isinstance(result, dict) else str(result)
+            if len(results) > 1:
+                parts.append(f"Tool result {i+1}:\n{data}")
+            else:
+                parts.append(f"Tool execution result:\n{data}")
+
+        tool_data = "\n\n".join(parts)
+
+        # Build prompt with reference context
+        prompt = f"""[CONTEXTUAL DATA]
+{tool_data}
 """
         if last_assistant:
             prompt += f"""
-Previous answer you already gave to the user:
-{last_assistant[:2000]}
+[REFERENCE ONLY - PREVIOUS ANSWER]
+{last_assistant[:1500]}
+(Use the above ONLY for context/flow. DO NOT REPEAT IT.)
 """
+        
         prompt += f"""
-Tool execution result:
-{json.dumps(tool_result, indent=2) if isinstance(tool_result, dict) else str(tool_result)}
+---
 
-IMPORTANT RULES:
-- "Original request" is the CURRENT, LATEST user message. Answer THAT, not an earlier question.
-- "Previous answer" is what you already sent the user. If the current request is only a short reaction/acknowledgment (e.g. "dih ada aku ternyata", "iya iya", "oke cukup"), reply briefly to it. Do NOT re-print the previous report/list/format again.
-- Never repeat your previous message verbatim. Vary the wording if you must address similar content.
-- If the tool result does not directly answer the current request, say so concisely instead of dumping the whole result."""
+User request: {original_prompt}
 
-        async def _call(api_key):
+RULES:
+1. NEVER repeat your previous answer verbatim. 
+2. Use the [REFERENCE] only to understand what was already discussed.
+3. Generate a fresh, NEW response based on the current tool results.
+4. If the user is asking a follow-up, ensure your new answer connects logically to the previous context without echoing it.
+5. Keep response concise and in tsundere character."""
+
+        async def _call(api_key, model):
             client = self._get_client(api_key)
             response = await client.aio.models.generate_content(
-                model=self.model_name,
+                model=model,
                 contents=prompt,
                 config=config
             )
@@ -285,11 +491,11 @@ IMPORTANT RULES:
                 data=img["data"]
             )))
 
-        async def _call(api_key):
+        async def _call(api_key, model):
             client = self._get_client(api_key)
-            logger.info(f"Generating VLM with model: {self.model_name}, images: {len(images)}")
+            logger.info(f"Generating VLM with model: {model}, images: {len(images)}")
             response = await client.aio.models.generate_content(
-                model=self.model_name,
+                model=model,
                 contents=contents,
                 config=config
             )

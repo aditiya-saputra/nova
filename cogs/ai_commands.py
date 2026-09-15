@@ -38,7 +38,6 @@ class AICommands(commands.Cog):
                 except Exception:
                     nuggets = []
                 system_prompt = context_builder.build_system_prompt(metadata, nuggets) if context_builder else ""
-                prompt = f"{system_prompt}\n\nUser: {question}" if system_prompt else question
                 history = []
                 if session_manager:
                     session_manager.add_message(channel_key, "user", question)
@@ -49,7 +48,7 @@ class AICommands(commands.Cog):
                     ]
                 if history_store:
                     history_store.append_message(channel_key, ctx.author.id, "user", question)
-                response = await gemini.generate(prompt, history=history or None)
+                response = await gemini.generate(question, system_instruction=system_prompt, history=history or None)
                 if session_manager:
                     session_manager.add_message(channel_key, "assistant", response)
                 if history_store:
@@ -59,7 +58,7 @@ class AICommands(commands.Cog):
                 await ctx.send(chunk)
         except Exception as e:
             logger.error(f"AI prefix command error: {e}")
-            await ctx.send(f"Error: {e}")
+            await ctx.send("Terjadi kesalahan internal. Coba lagi nanti.")
 
     @commands.command(name="ask")
     async def ask(self, ctx, *, question: str):

@@ -1,6 +1,7 @@
 import json
 import os
 import asyncio
+import threading
 import time
 from datetime import datetime
 from utils.logger import get_logger
@@ -14,12 +15,13 @@ class AuditLogger:
         self.audit_dir = os.path.join(settings.DATA_DIR, "audit")
         os.makedirs(self.audit_dir, exist_ok=True)
         self.audit_file = os.path.join(self.audit_dir, "audit.jsonl")
-        self._lock = asyncio.Lock()
+        self._file_lock = threading.Lock()
 
     def _write_entry(self, entry):
         try:
-            with open(self.audit_file, "a", encoding="utf-8") as f:
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            with self._file_lock:
+                with open(self.audit_file, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
         except Exception as e:
             logger.error(f"Audit log error: {e}")
 
@@ -29,8 +31,7 @@ class AuditLogger:
             "event": event_type,
             "data": data
         }
-        async with self._lock:
-            await asyncio.to_thread(self._write_entry, entry)
+        await asyncio.to_thread(self._write_entry, entry)
 
     async def log_message(self, user_id, user_name, channel_id, trigger_type, content):
         await self.log("message_received", {
@@ -101,16 +102,19 @@ class AuditLogger:
         })
 
     def get_recent_logs(self, limit=50):
+        from collections import deque
         logs = []
         try:
             if os.path.exists(self.audit_file):
+                recent = deque(maxlen=limit)
                 with open(self.audit_file, "r", encoding="utf-8") as f:
-                    lines = f.readlines()
-                    for line in lines[-limit:]:
-                        try:
-                            logs.append(json.loads(line.strip()))
-                        except json.JSONDecodeError:
-                            continue
+                    for line in f:
+                        recent.append(line)
+                for line in recent:
+                    try:
+                        logs.append(json.loads(line.strip()))
+                    except json.JSONDecodeError:
+                        continue
         except Exception as e:
             logger.error(f"Error reading audit logs: {e}")
         return logs

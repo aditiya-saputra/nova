@@ -43,7 +43,6 @@ class SlashCommands(commands.Cog):
             )
 
             try:
-                import json
                 response_text = await groq.retrieve_relevant(retrieve_prompt)
                 relevant_facts = json.loads(response_text.strip().strip("```json").strip("```"))
                 if not isinstance(relevant_facts, list):
@@ -76,14 +75,21 @@ class SlashCommands(commands.Cog):
             ]
             import asyncio as _asyncio
             if history_payload:
-                response = await _asyncio.wait_for(gemini.generate(prompt, history=history_payload), timeout=45)
+                response = await _asyncio.wait_for(gemini.generate(question, system_instruction=system_prompt, history=history_payload), timeout=45)
             else:
-                response = await _asyncio.wait_for(gemini.generate(prompt), timeout=45)
+                response = await _asyncio.wait_for(gemini.generate(question, system_instruction=system_prompt), timeout=45)
 
             session_manager.add_message(channel_key, "assistant", response)
             await history_store.aappend_message(channel_key, user_id, "assistant", response)
 
-            await interaction.followup.send(response)
+            # Discord limit: 2000 chars
+            if len(response) > 2000:
+                chunks = [response[i:i + 2000] for i in range(0, len(response), 2000)]
+                await interaction.followup.send(chunks[0])
+                for chunk in chunks[1:]:
+                    await interaction.followup.send(chunk)
+            else:
+                await interaction.followup.send(response)
 
             if response and not response.startswith("Error:"):
                 extract_prompt = context_builder.build_rag_extract_prompt(question, response, metadata)
@@ -110,7 +116,7 @@ class SlashCommands(commands.Cog):
 
         except Exception as e:
             logger.error(f"Slash /ask error: {e}")
-            await interaction.followup.send(f"Error: {str(e)}")
+            await interaction.followup.send("Terjadi kesalahan internal. Coba lagi nanti.", ephemeral=True)
 
     @app_commands.command(name="recall", description="Recall memories from this channel")
     @app_commands.describe(query="Search query for memories")
@@ -126,7 +132,6 @@ class SlashCommands(commands.Cog):
                 return
 
             if query:
-                import json
                 groq = self.bot.groq
                 nuggets_text = "\n".join(
                     f"- [{n.get('channel_id', 'N/A')}] {n.get('fact', '')} (by user {n.get('user_id', 'N/A')})"
@@ -160,7 +165,7 @@ class SlashCommands(commands.Cog):
 
         except Exception as e:
             logger.error(f"Slash /recall error: {e}")
-            await interaction.followup.send(f"Error: {str(e)}")
+            await interaction.followup.send("Terjadi kesalahan internal. Coba lagi nanti.", ephemeral=True)
 
     @app_commands.command(name="forget", description="Hapus semua ingatan Nova di channel ini (memori RAG + riwayat percakapan)")
     @app_commands.default_permissions(manage_messages=True)
@@ -242,7 +247,7 @@ class SlashCommands(commands.Cog):
 
         except Exception as e:
             logger.error(f"Slash /history error: {e}")
-            await interaction.followup.send(f"Error: {str(e)}")
+            await interaction.followup.send("Terjadi kesalahan internal. Coba lagi nanti.", ephemeral=True)
 
     @app_commands.command(name="deleted", description="View recently deleted messages")
     @app_commands.describe(limit="Number of deleted messages to show (default: 10)")
@@ -284,7 +289,7 @@ class SlashCommands(commands.Cog):
 
         except Exception as e:
             logger.error(f"Slash /deleted error: {e}")
-            await interaction.followup.send(f"Error: {str(e)}")
+            await interaction.followup.send("Terjadi kesalahan internal. Coba lagi nanti.", ephemeral=True)
 
     @app_commands.command(name="audit", description="View audit logs")
     @app_commands.describe(event_type="Event type: message_deleted, message_edited, tool_call, tool_result, error, all (default: all)", limit="Number of logs to show (default: 15)")
@@ -337,7 +342,7 @@ class SlashCommands(commands.Cog):
 
         except Exception as e:
             logger.error(f"Slash /audit error: {e}")
-            await interaction.followup.send(f"Error: {str(e)}")
+            await interaction.followup.send("Terjadi kesalahan internal. Coba lagi nanti.", ephemeral=True)
 
     @app_commands.command(name="send", description="Send a message to a channel with optional mention")
     @app_commands.describe(

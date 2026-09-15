@@ -4,6 +4,181 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [1.11.0] - 2026-09-15
+
+### 🐛 Fixed (18 bugs — deep scan)
+
+#### Critical (4)
+- **`UnboundLocalError` in TTL prune** (`memory/scheduled_jobs.py:86-87`): Exception handler referenced `record` variable that was never assigned when `json.loads` failed. Split exception handling: `JSONDecodeError` keeps raw line, other errors keep parsed record.
+- **`AttributeError` on null content** (`services/gemini_client.py:317`): `_parse_tool_response` accessed `response.candidates[0].content.parts` without null-checking `content`. Gemini API can return `content=None` on safety filter blocks.
+- **Path traversal via `channel_id`** (`memory/rag_store.py:36`): `_get_file_path` interpolated `channel_id` directly into filename. Malicious values like `../../` could escape the `memories/` directory. Now sanitized with regex.
+- **Path traversal via `skill_name`** (`services/tool_executor.py:672`): `_use_skill` constructed file path from unsanitized user/LLM input. Added regex whitelist (`^[a-zA-Z0-9_-]+$`) and `is_relative_to()` check.
+
+#### Medium (10)
+- **`last_assistant` param ignored** (`services/gemini_client.py:415`): `synthesize_with_tool_result` (singular) accepted `last_assistant` but didn't pass it to `_synthesize_multi`.
+- **Extension whitelist bypass** (`handlers/file_processor.py:56`): Files without extensions (e.g., `malware`) bypassed the whitelist filter. Now requires `text/*` MIME type when no extension is present.
+- **`latin-1` decodes binary data** (`handlers/file_processor.py:119`): `latin-1` fallback always succeeds, allowing binary files to be decoded as garbled text. Added null-byte heuristic before fallback.
+- **Compaction prompt unreadable** (`core/context_builder.py:58`): History list rendered as raw Python dict repr. Now formatted as `[role]: content` per message.
+- **`tree.sync()` rate limit** (`core/event_handler.py:112`): Called on every `on_ready` reconnect, hitting Discord's ~1/hour rate limit. Added `_tree_synced` flag.
+- **`on_command_error` leaks errors** (`core/event_handler.py:119`): Raw exception sent to channel and could crash on deleted channel. Now sends generic message with `HTTPException` guard.
+- **System prompt not as `system_instruction`** (`cogs/slash_commands.py:69`, `cogs/ai_commands.py:41`): `/ask` and `!ask` embedded system prompt in user message instead of passing as `system_instruction` parameter.
+- **Error details leaked to users** (`cogs/slash_commands.py`): Multiple slash commands sent raw `str(e)` to users. Now sends generic error message.
+- **Invalid env vars crash at import** (`config/settings.py:41-55`): `COMPACTION_THRESHOLD=abc` caused `ValueError` at import time. Added `_safe_int`/`_safe_float` helpers.
+- **Audit file loaded into memory** (`memory/audit_logger.py:104`): `get_recent_logs` used `f.readlines()` loading entire file. Now uses `deque(maxlen=limit)`.
+
+#### Low (4)
+- **Unbounded session caches** (`memory/session_manager.py`): `sessions`, `last_activity`, `token_counts` grew without bound. Added `MAX_SESSIONS=500` with LRU eviction.
+- **Unbounded tracker dicts** (`handlers/message_handler.py:91`): `_last_tool_calls`, `_last_response_text`, `_last_tool_result_fp` grew without bound. Added `MAX_CHANNEL_TRACKERS=200` with eviction.
+- **Non-atomic preferences write** (`memory/mention_store.py:35`): `_save_preferences` wrote directly to file. Crash mid-write corrupted data. Now uses temp file + `os.replace()`.
+- **Relative path for prefixes** (`core/bot.py:21`): Used relative `config/prefixes.json`. Now uses `Path(__file__).resolve()` for absolute path.
+
+### 📁 File Changes
+```
+memory/scheduled_jobs.py       # Split exception handler in TTL prune
+services/gemini_client.py      # Null-check content, pass last_assistant
+memory/rag_store.py            # Sanitize channel_id in file path
+services/tool_executor.py      # Whitelist + is_relative_to for skill_name
+handlers/file_processor.py     # No-ext MIME check, null-byte binary detection
+core/context_builder.py        # Format history as [role]: content
+cogs/slash_commands.py         # system_instruction param, generic errors
+cogs/ai_commands.py            # system_instruction param, generic error
+core/event_handler.py          # tree.sync flag, on_command_error guard
+config/settings.py             # _safe_int/_safe_float helpers
+memory/audit_logger.py         # deque for recent logs
+memory/session_manager.py      # MAX_SESSIONS + LRU eviction
+handlers/message_handler.py    # MAX_CHANNEL_TRACKERS + eviction
+memory/mention_store.py        # Atomic write via temp file
+core/bot.py                    # Absolute path for prefixes.json
+```
+
+---
+
+## [1.10.0] - 2026-09-15
+
+### ✨ Added (File Reading Module)
+- **`handlers/file_processor.py`**: New module for reading non-image file attachments (code, JSON, text, config). Supports 40+ extensions (.py, .js, .ts, .json, .yaml, .md, etc.) with 500KB/file and 8000 chars content limit.
+- **Tool `read_attachment`** (`services/tool_executor.py`): New tool for Gemini to read uploaded file contents on-demand. Use when user asks to review, analyze, or discuss uploaded files.
+- **Auto-detection** (`handlers/message_handler.py`): Non-image file attachments are automatically detected, downloaded, and injected into prompt context. File contents are also cached for the `read_attachment` tool.
+- **Parallel I/O**: File download runs in parallel with VLM, RAG, compaction, and URL fetch via `asyncio.gather`.
+
+### 🐛 Fixed
+- **`thought_signatures` overwrite** (`handlers/message_handler.py:383`): Compositional function calling loop was resetting `thought_signatures = []`, discarding initial signatures from Gemini response. This could cause `400 INVALID_ARGUMENT` errors on subsequent tool rounds.
+- **Sequential URL fetch** (`handlers/message_handler.py:_fetch_url_contexts`): URLs were fetched sequentially. Now parallelized via `asyncio.gather` for faster response (2 URLs = ~2x faster).
+- **Duplicate `import json`** (`cogs/slash_commands.py`): Removed redundant inline `import json` in `/ask` and `/recall` commands (already imported at module level).
+
+### 📁 File Changes
+```
+handlers/file_processor.py      # NEW: File attachment reader
+services/tool_executor.py       # +1 tool def (read_attachment), +1 method, +1 dispatch
+handlers/message_handler.py     # +FileProcessor integration, parallel URL fetch, thought_signature fix
+main.py                         # +FileProcessor wiring + aclose
+config/prompts/personality.txt  # +tool docs for read_attachment
+```
+
+---
+
+## [1.9.1] - 2026-09-13
+
+### 🐛 Fixed (thought_signature — Gemini API Requirement)
+- **Root Cause**: Gemini API now **requires** `thought_signature` on every `functionCall` part in conversation history. When Nova sent function calls back to Gemini via `models.generate_content`, the `thought_signature` bytes were missing from `Part` objects, causing `400 INVALID_ARGUMENT: Function call is missing a thought_signature in functionCall parts`.
+- **Fix** (`services/gemini_client.py`):
+  - Added `_extract_thought_signatures()` — extract `thought_signature` bytes from each Part in a Content object.
+  - Added `_rebuild_content_with_signatures()` — rebuild Content with `thought_signature` properly attached to each Part.
+  - Added `_build_contents_with_signatures()` — build contents array with proper thought_signature handling.
+  - Updated `_parse_tool_response()` — now also extracts `thought_signatures` alongside tool_calls.
+  - Updated `generate_with_tools()` — stores `thought_signatures` from response for compositional loop.
+  - Updated `generate_with_tool_results()` — accepts `thought_signatures` parameter and passes it to `_build_contents_with_signatures()`.
+- **Fix** (`handlers/message_handler.py`):
+  - `_handle_tool_calls()` now accepts `thought_signatures` parameter.
+  - `initial_thought_signatures` extracted from `generate_with_tools` response and passed through compositional loop.
+  - Each round accumulates `thought_signatures` from previous response and passes them to next `generate_with_tool_results` call.
+
+### ✨ Added (Anti-Slop-Writing Skill)
+- **`skills/anti_slop_writing.md`** — New skill for detecting AI-generated/slop writing. Based on Wikipedia's ["Signs of AI writing"](https://en.wikipedia.org/wiki/Wikipedia:Signs_of_AI_writing) guide. Covers 30+ indicators including content clues, language patterns, style tells, model-specific artifacts (ChatGPT, Gemini, Grok, DeepSeek, Perplexity fingerprints), citation issues, and more.
+- Skills directory now contains **2 skills**: `eyd_helper` (EYD & grammar) and `anti_slop_writing` (AI/slop detection).
+
+### 📁 File Changes
+```
+skills/
+├── eyd_helper.md          # Built-in skill: EYD Helper
+└── anti_slop_writing.md   # New: Anti-Slop-Writing AI detection skill
+```
+
+---
+
+## [1.9.0] - 2026-09-11
+
+### ✨ Added (Skills System — Tool Calling Based)
+- **Skills System** (`skills/` directory): Nova kini mendukung skills yang disimpan sebagai file `.md` di direktori `skills/`. Setiap skill berisi pengetahuan khusus yang bisa digunakan via tool calling.
+- **Tool `use_skill`** (`services/tool_executor.py`): Tool baru untuk memanggil skill. Gemini akan memilih skill yang relevan dan memproses query dengan context dari skill file.
+- **Tool `list_skills`** (`services/tool_executor.py`): Tool untuk melihat semua skill yang tersedia.
+- **EYD Helper Skill** (`skills/eyd_helper.md`): Skill contoh pertama — ahli Ejaan Yang Disempurnakan (EYD) dan tata bahasa Indonesia dengan knowledge base lengkap.
+
+### 🐛 Fixed (Compositional Function Calling 400 Error)
+- **Root Cause**: `generate_with_tool_results()` menggunakan `models.generate_content` (stateless) tanpa menyertakan function call sebelumnya di conversation history. Gemini API membutuhkan function response datang **langsung setelah** function call turn.
+- **Fix** (`services/gemini_client.py`):
+  - `generate_with_tools()` kini mengembalikan `chat` object di result dict untuk dipertahankan di compositional loop.
+  - `generate_with_tool_results()` menerima parameter `chat` — jika ada, menggunakan `chat.send_message()` (stateful) bukan `models.generate_content()`.
+  - Function response kini di-wrap dalam `types.Content(role="tool", parts=[...])` sesuai dokumentasi Gemini API.
+- **Fix** (`handlers/message_handler.py`): `_handle_tool_calls()` menerima dan meneruskan `chat` object melalui compositional loop.
+
+### 🏗️ Architecture
+- **Simple File-Based**: Skills = file `.md` di folder `skills/`. Tidak perlu framework kompleks.
+- **Tool Calling Integration**: Gemini secara otomatis memanggil `use_skill` saat user meminta sesuatu yang relevan dengan skill.
+- **Auto-Discovery**: `list_skills` otomatis scan semua `.md` file di `skills/`.
+
+### 📁 File Structure
+```
+skills/
+└── eyd_helper.md    # Skill EYD Helper (contoh)
+```
+
+### 🔧 Cara Membuat Skill Baru
+1. Buat file `.md` di folder `skills/` (mis. `translator.md`)
+2. Isi dengan pengetahuan/instruksi skill
+3. Restart bot (atau Gemini akan mendeteksi skill baru secara otomatis)
+4. User bisa langsung gunakan — Gemini akan memanggil tool `use_skill` secara otomatis
+
+---
+
+## [1.8.1] - 2026-09-11
+
+### ✨ Added (Ignore Role & @everyone Mentions)
+- **Role & @everyone Mention Filtering**: Nova kini mengabaikan pesan yang hanya berisi mention role (`<@&ROLE_ID>`) atau `@everyone`/`@here` tanpa konten bermakna lainnya. Pesan seperti `@everyone` atau `@Admin` saja tidak akan memicu response dari Nova.
+- **Smart Content Stripping (`core/message_router.py`)**:
+  - `_strip_all_mentions()`: Method helper untuk menghapus semua jenis mention Discord (bot, role, @everyone, @here) dari konten pesan.
+  - `_is_only_mention_content()`: Cek apakah pesan hanya berisi mention tanpa konten bermakna.
+- **Clean Content Updated**: `clean_content()` kini juga menghapus role mention dan @everyone/@here dari konten yang diproses, sehingga pesan seperti `@Nova @everyone halo` hanya akan memproses `halo`.
+
+### 🐛 Fixed
+- **False Trigger on Role Mentions**: Pesan yang hanya berisi role mention atau @everyone tidak lagi memicu Nova untuk merespon.
+
+---
+
+## [1.8.0] - 2026-09-11
+
+### ✨ Added (Parallel & Compositional Function Calling)
+- **Parallel Tool Execution**: Gemini kini dapat memicu beberapa tool sekaligus dalam satu turn. Nova mengeksekusi semua tool tersebut secara konkuren (`asyncio.gather`) untuk respons yang lebih cepat.
+- **Compositional Loop**: Implementasi "chaining" tool call hingga 5 ronde. Hasil tool dikirim balik ke Gemini, memungkinkan model untuk meminta tool tambahan berdasarkan data sebelumnya sebelum memberikan jawaban akhir.
+- **New Methods (`services/gemini_client.py`)**: 
+  - `generate_with_tool_results()`: Mengirim balik hasil eksekusi tool ke model dalam format `function_response`.
+  - `synthesize_with_tool_results()`: Mendukung sintesis jawaban dari banyak hasil tool sekaligus.
+  - `_parse_tool_response()`: Parser terpusat untuk menangani N tool calls atau teks biasa.
+
+### 🐛 Fixed (Repetitive Output & Prompt Focus)
+- **Tool Result Fingerprinting**: Nova kini melacak hash/fingerprint hasil tool terakhir per channel (`_last_tool_result_fp`). Jika tool+args sama dan data belum berubah, Nova menggunakan cache.
+- **Staleness Guard**: Cache tool result otomatis expired setelah 5 menit untuk memastikan data tetap aktual.
+- **Prompt Best Practices**: 
+  - **Reordering**: Mengikuti panduan resmi Gemini, query user kini diletakkan di **akhir prompt** agar model lebih fokus pada instruksi terbaru.
+  - **Contextual Reference**: Re-implementasi `last_assistant` sebagai referensi konteks saja. Model dilarang keras mengulang jawaban sebelumnya secara verbatim, tapi diizinkan memakainya untuk menjaga alur percakapan tetap nyambung.
+- **Anti-Repeat Extended**: Logic anti-repeat kini mencakup deteksi argumen tool yang identik, bukan hanya panjang pesan user.
+
+### 🛠 Refactored
+- **`handlers/message_handler.py`**: Logika penanganan tool dipisahkan ke method `_handle_tool_calls` untuk modularitas dan keterbacaan.
+- **`services/gemini_client.py`**: Refaktor struktur prompt sintesis untuk efisiensi token dan akurasi respons.
+
+---
+
 ## [1.7.4] - 2026-09-05
 
 ### ✨ Added (command hapus ingatan)

@@ -33,8 +33,35 @@ Nova adalah bot Discord AI dengan kepribadian tsundere feminim yang didukung ole
 - **Tool Call Audit** - Log semua pemanggilan tool dan hasilnya
 - **Presence Log** - Audit log perpindahan status user
 
+### 🚫 Smart Mention Filtering
+- **Ignore Role Mentions** - Nova tidak akan merespon pesan yang hanya berisi mention role (`@Role`)
+- **Ignore @everyone/@here** - Nova tidak akan merespon pesan yang hanya berisi `@everyone` atau `@here`
+- **Smart Content Stripping** - Saat Nova di-mention bersama role/@everyone, hanya konten bermakna yang diproses
+
 ### 💾 Automatic Backup
 - **GitHub Auto-Backup** - Backup data memori & audit logs ke GitHub private repository secara berkala
+
+### 🧩 Skills System (Tool Calling)
+- **File-Based Skills** — Skills disimpan sebagai file `.md` di folder `skills/`
+- **Auto-Discovery** — Gemini otomatis menemukan dan menggunakan skill yang relevan
+- **Tool Calling** — User tidak perlu panggil skill manual — Gemini akan memanggil `use_skill` secara otomatis
+- **Built-in Skills:**
+  - **EYD Helper** (`skills/eyd_helper.md`) — Ahli Ejaan Yang Disempurnakan dan tata bahasa Indonesia
+  - **Anti-Slop-Writing** (`skills/anti_slop_writing.md`) — Deteksi tulisan AI & slop writing (30+ indicators: content clues, language patterns, style tells, model fingerprints for ChatGPT/Gemini/Grok/DeepSeek/Perplexity, citation issues, dll.)
+- **Model-Agnostic Skill Loading** — `generate_with_tools()` dan `generate_with_tool_results()` kini preserve `thought_signature` untuk kompatibilitas dengan Gemini API terbaru (v1 requirement)
+
+### 📎 File Reading
+- **Auto-Detection** — File non-image yang di-upload otomatis dideteksi dan dibaca
+- **Read Attachment Tool** — Gemini bisa membaca isi file on-demand via tool `read_attachment`
+- **Supported Formats** — Code (.py, .js, .ts, .go, .rs, dll), data (.json, .yaml, .csv), text (.txt, .md)
+- **Security** — Extension whitelist, size limit 500KB/file, content truncation 8000 chars, null-byte binary detection
+
+### 🛡️ Security & Stability
+- **Path Traversal Protection** — Sanitasi input pada `rag_store` (channel_id) dan `tool_executor` (skill_name)
+- **Safe Env Parsing** — Invalid env vars tidak lagi crash bot saat import
+- **Atomic File Writes** — Mention preferences ditulis via temp file + `os.replace()` anti-corruption
+- **Generic Error Messages** — Slash commands tidak lagi leak internal error details ke users
+- **Memory Bounds** — Session caches (500) dan tracker dicts (200/channel) di-evict otomatis
 
 ---
 
@@ -68,6 +95,8 @@ GEMINI_MODEL=gemini-3-flash-preview
 GEMINI_FALLBACK_MODELS=gemini-flash-latest,gemini-flash-lite-latest
 ```
 
+> **Note:** Tool calling kini preserve `thought_signature` pada setiap function call part untuk kompatibilitas dengan Gemini API v1. Tanpa ini, API akan mengembalikan `400 INVALID_ARGUMENT: Function call is missing a thought_signature`.
+
 Catatan:
 - Urutan fallback mengikuti urutan penulisan — model pertama yang berhasil yang dipakai.
 - Jangan masukkan model yang sudah deprecated (mis. `gemini-2.5-flash`) ke dalam rantai; Gemini menolaknya dengan 404 untuk key baru.
@@ -90,6 +119,7 @@ Catatan:
 | `/mystatus` | Cek status auto-mention kamu |
 | `/analyze` | Analisis gambar dari URL menggunakan VLM |
 | `/screenshot` | Screenshot webpage dan analisis tampilan visualnya |
+| `/read` | Baca isi file attachment yang di-upload |
 
 ---
 
@@ -168,12 +198,14 @@ discord-ai-bot/
 │   ├── message_handler.py   # Main orchestrator (handle/handle_delete/handle_edit/handle_presence)
 │   ├── message_cache.py     # LRU cache for deleted-message tracking
 │   ├── attachment_processor.py # VLM inline image analysis
+│   ├── file_processor.py    # File attachment reader (code, JSON, text)
 │   └── fact_extractor.py    # Post-response RAG nugget extraction
 ├── services/                # External API integrations
 │   ├── gemini_client.py     # Gemini API & VLM client
 │   ├── groq_client.py       # Groq API client
 │   ├── tavily_client.py     # Tavily search client
 │   ├── browserless_client.py# Browserless web fetch & screenshot
+│   ├── hyperbrowser_client.py # Hyperbrowser web fetch & screenshot
 │   ├── tool_executor.py     # Tool definition & execution
 │   └── token_counter.py     # tiktoken wrapper
 ├── memory/                  # Memory & storage management
@@ -185,6 +217,9 @@ discord-ai-bot/
 │   ├── mention_store.py     # User auto-mention preferences
 │   ├── github_backup.py     # Automatic Git backup
 │   └── scheduled_jobs.py    # TTL prune + history cleanup
+├── skills/                  # Skills (file .md)
+│   ├── eyd_helper.md        # Built-in skill: EYD Helper
+│   └── anti_slop_writing.md # Anti-Slop-Writing AI detection skill
 ├── config/                  # Configuration & prompts
 │   ├── settings.py          # Environment settings (BOT_PREFIX, etc.)
 │   ├── prefixes.json        # Fallback prefix config

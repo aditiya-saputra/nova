@@ -33,11 +33,18 @@ class MentionStore:
         return {}
 
     def _save_preferences(self):
+        import tempfile
         try:
-            with open(self.preferences_file, "w", encoding="utf-8") as f:
+            fd, tmp = tempfile.mkstemp(dir=str(self.mentions_dir), suffix='.json.tmp')
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
                 json.dump(self.preferences, f, indent=2, ensure_ascii=False)
+            os.replace(str(tmp), str(self.preferences_file))
         except Exception as e:
             logger.error(f"Failed to save mention preferences: {e}")
+            try:
+                os.unlink(str(tmp))
+            except Exception:
+                pass
 
     def get_user_pref(self, user_id):
         user_id = str(user_id)

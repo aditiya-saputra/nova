@@ -1,7 +1,12 @@
 import json
+import re
+from pathlib import Path
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Skills directory — scan semua .md file
+SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills"
 
 
 class ToolExecutor:
@@ -157,6 +162,64 @@ class ToolExecutor:
                     },
                     "required": ["url"]
                 }
+            },
+            {
+                "name": "use_skill",
+                "description": (
+                    "Gunakan skill/specialist untuk menjawab pertanyaan user. "
+                    "Skill berisi pengetahuan khusus (EYD, translate, code review, dll). "
+                    "Pilih skill yang paling relevan dengan pertanyaan user."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "skill_name": {
+                            "type": "string",
+                            "description": (
+                                "Nama skill yang akan digunakan. "
+                                "Gunakan list_skills untuk melihat semua skill yang tersedia."
+                            )
+                        },
+                        "query": {
+                            "type": "string",
+                            "description": "Pertanyaan atau instruksi yang akan diproses dengan skill ini"
+                        }
+                    },
+                    "required": ["skill_name", "query"]
+                }
+            },
+            {
+                "name": "list_skills",
+                "description": (
+                    "Lihat semua skill/specialist yang tersedia di sistem. "
+                    "Gunakan sebelum use_skill untuk mengetahui skill apa saja yang ada."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {}
+                }
+            },
+            {
+                "name": "read_attachment",
+                "description": (
+                    "Baca isi file attachment yang di-upload user di pesan ini. "
+                    "Gunakan saat user upload file dan minta dibaca, direview, atau dianalisis. "
+                    "Mendukung file code (.py, .js, .ts, dll), data (.json, .yaml, .csv), "
+                    "dan text (.txt, .md). Tidak mendukung gambar (gunakan VLM)."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "filename": {
+                            "type": "string",
+                            "description": (
+                                "Nama file attachment yang ingin dibaca. "
+                                "Gunakan filename yang persis sama dengan yang terlihat di pesan."
+                            )
+                        }
+                    },
+                    "required": ["filename"]
+                }
             }
         ]
 
@@ -202,6 +265,17 @@ class ToolExecutor:
                 return await self._screenshot_page(
                     parameters.get("url", ""),
                     parameters.get("question", "Analisis tampilan halaman ini.")
+                )
+            elif tool_name == "use_skill":
+                return await self._use_skill(
+                    parameters.get("skill_name", ""),
+                    parameters.get("query", "")
+                )
+            elif tool_name == "list_skills":
+                return await self._list_skills()
+            elif tool_name == "read_attachment":
+                return await self._read_attachment(
+                    parameters.get("filename", "")
                 )
             else:
                 return {"error": f"Unknown tool: {tool_name}"}
@@ -506,3 +580,146 @@ class ToolExecutor:
         except Exception as e:
             logger.error(f"VLM screenshot_page error: {e}")
             return {"error": f"Analysis failed: {str(e)}"}
+
+    # ═══════════════════════════════════════════════════════════════
+    # SKILL TOOLS
+    # ═══════════════════════════════════════════════════════════════
+
+    async def _list_skills(self):
+        """List semua skill (.md files) yang tersedia di skills/ directory."""
+        if not SKILLS_DIR.exists():
+            return {"skills": [], "count": 0, "message": "Skills directory not found"}
+
+        skills = []
+        for f in sorted(SKILLS_DIR.glob("*.md")):
+            # Extract name from filename: eyd_helper.md → eyd_helper
+            name = f.stem
+            # Try to extract display name from first heading
+            try:
+                content = f.read_text(encoding="utf-8")
+                for line in content.splitlines():
+                    if line.startswith("# "):
+                        # "# Skill: EYD Helper — ..." → "EYD Helper"
+                        display = line.lstrip("# ").strip()
+                        if display.startswith("Skill:"):
+                            display = display[len("Skill:"):].strip()
+                        # Cut at " —" if present
+                        if " —" in display:
+                            display = display.split(" —")[0].strip()
+                        break
+                else:
+                    display = name.replace("_", " ").title()
+            except Exception:
+                display = name.replace("_", " ").title()
+
+            skills.append({
+                "name": name,
+                "display_name": display,
+                "file": f.name,
+            })
+
+        return {
+            "skills": skills,
+            "count": len(skills),
+            "message": f"{len(skills)} skill(s) available"
+        }
+
+    async def _read_attachment(self, filename):
+        """Baca isi file attachment dari cache yang di-populate FileProcessor.
+
+        File content di-cache per-message oleh MessageHandler saat pesan diterima.
+        Tool ini memungkinkan Gemini request file spesifik dari attachment yang sama.
+        """
+        if not filename:
+            return {"error": "No filename provided"}
+
+        # Cari di file cache (di-populate oleh MessageHandler)
+        file_cache = getattr(self.bot, "_file_attachment_cache", {})
+        if not file_cache:
+            return {"error": "No file attachments available. Upload a file and ask me to read it."}
+
+        # Cari file berdasarkan filename
+        for key, files in file_cache.items():
+            for fc in files:
+                if fc.get("filename") == filename:
+                    content = fc.get("content", "")
+                    truncated = fc.get("truncated", False)
+                    result = {
+                        "filename": filename,
+                        "content": content,
+                        "size": fc.get("size", 0),
+                    }
+                    if truncated:
+                        result["note"] = "File content was truncated due to size limit."
+                    return result
+
+        available = []
+        for files in file_cache.values():
+            for fc in files:
+                available.append(fc.get("filename", ""))
+        return {
+            "error": f"File '{filename}' not found",
+            "available_files": list(set(available)),
+        }
+
+    async def _use_skill(self, skill_name, query):
+        """Load skill .md file dan proses query dengan Gemini menggunakan skill sebagai context."""
+        if not skill_name:
+            return {"error": "No skill name provided"}
+
+        if not query:
+            return {"error": "No query provided"}
+
+        if not re.match(r'^[a-zA-Z0-9_\-]+$', skill_name):
+            return {"error": "Invalid skill name"}
+
+        # Load skill file
+        skill_path = SKILLS_DIR / f"{skill_name}.md"
+        if not skill_path.resolve().is_relative_to(SKILLS_DIR.resolve()):
+            return {"error": "Invalid skill name"}
+        if not skill_path.exists():
+            # List available skills for error message
+            available = [f.stem for f in SKILLS_DIR.glob("*.md")] if SKILLS_DIR.exists() else []
+            return {
+                "error": f"Skill '{skill_name}' not found",
+                "available_skills": available
+            }
+
+        try:
+            skill_content = skill_path.read_text(encoding="utf-8")
+        except Exception as e:
+            return {"error": f"Failed to read skill file: {str(e)}"}
+
+        # Process with Gemini
+        gemini = self.bot.gemini
+        if not gemini:
+            return {"error": "Gemini not configured"}
+
+        prompt = f"""Kamu adalah assistant yang menggunakan skill/specialist berikut untuk menjawab.
+
+=== SKILL CONTENT ===
+{skill_content}
+=== END SKILL ===
+
+Pertanyaan/instruksi user:
+{query}
+
+Instruksi:
+1. Gunakan pengetahuan dari skill di atas untuk menjawab pertanyaan user.
+2. Berikan jawaban yang lengkap, akurat, dan terstruktur.
+3. Gunakan format markdown untuk tabel, bold, dan code block.
+4. Jika pertanyaan di luar cakupan skill, tetap jawab dengan pengetahuan umummu."""
+
+        try:
+            response = await gemini.generate(
+                prompt,
+                system_instruction="Kamu adalah assistant yang ahli dalam bidangnya. Jawab dalam Bahasa Indonesia yang baku."
+            )
+            return {
+                "success": True,
+                "skill_used": skill_name,
+                "query": query,
+                "response": response
+            }
+        except Exception as e:
+            return {"error": f"Gemini processing failed: {str(e)}"}

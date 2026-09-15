@@ -57,7 +57,11 @@ class ContextBuilder:
 
     def build_compaction_prompt(self, history):
         template = self.load_prompt_template("compaction_prompt.txt")
-        return f"{template}\n\nConversation:\n{history}"
+        formatted = "\n".join(
+            f"[{m.get('role', 'unknown')}]: {m.get('content', '')}"
+            for m in history
+        )
+        return f"{template}\n\nConversation:\n{formatted}"
 
     def build_rag_extract_prompt(self, user_message, bot_response, metadata):
         template = self.load_prompt_template("rag_extract_prompt.txt")

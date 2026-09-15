@@ -23,14 +23,15 @@ class HistoryStore:
         if not path.exists():
             return history
 
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            try:
-                entry = json.loads(line)
-                history.append(entry)
-            except json.JSONDecodeError:
-                continue
+        with self._lock:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    entry = json.loads(line)
+                    history.append(entry)
+                except json.JSONDecodeError:
+                    continue
         return history
 
     def append(self, key, entry):

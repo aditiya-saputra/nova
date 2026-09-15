@@ -110,8 +110,10 @@ def setup_event_handlers(bot):
         )
 
         try:
-            synced = await bot.tree.sync()
-            logger.info(f"Slash commands synced: {len(synced)}")
+            if not getattr(bot, '_tree_synced', False):
+                synced = await bot.tree.sync()
+                bot._tree_synced = True
+                logger.info(f"Slash commands synced: {len(synced)}")
         except Exception as e:
             logger.error(f"Slash command sync error: {e}")
 
@@ -121,7 +123,10 @@ def setup_event_handlers(bot):
             return
         logger.error(f"Command error: {error}")
         rich.error_panel("Command Error", str(error))
-        await ctx.send(f"Error: {str(error)}")
+        try:
+            await ctx.send("Terjadi kesalahan internal. Coba lagi nanti.")
+        except discord.HTTPException:
+            pass
 
     @bot.event
     async def on_error(event, *args, **kwargs):
