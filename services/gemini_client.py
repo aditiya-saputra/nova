@@ -271,35 +271,13 @@ class GeminiClient:
                 signatures.append(ts if ts is not None else b'')
         return signatures
 
-    def _rebuild_content_with_signatures(self, content, thought_signatures):
-        """Rebuild Content object with thought_signature attached to each Part."""
-        if not content or not getattr(content, 'parts', None):
-            return content
-        new_parts = []
-        for i, part in enumerate(content.parts):
-            ts = thought_signatures[i] if i < len(thought_signatures) else b''
-            if ts:
-                new_part = types.Part(
-                    text=part.text,
-                    function_call=part.function_call,
-                    thought_signature=ts,
-                )
-                new_parts.append(new_part)
-            else:
-                new_parts.append(part)
-        return types.Content(role=content.role, parts=new_parts)
-
     def _build_contents_with_signatures(self, user_content, function_call_content, function_response_content, thought_signatures=None):
-        """Build contents array with proper thought_signature handling."""
+        """Build contents array — pass original content directly for thought_signature preservation."""
         contents = []
         if user_content:
             contents.append(user_content)
         if function_call_content:
-            if thought_signatures:
-                rebuilt = self._rebuild_content_with_signatures(function_call_content, thought_signatures)
-                contents.append(rebuilt)
-            else:
-                contents.append(function_call_content)
+            contents.append(function_call_content)
         if function_response_content:
             contents.append(function_response_content)
         return contents
@@ -404,7 +382,6 @@ class GeminiClient:
             result = self._parse_tool_response(response)
             # Preserve conversation state for next round
             result["user_content"] = user_content
-            result["thought_signatures"] = []
             if response.candidates and response.candidates[0].content:
                 content_obj = response.candidates[0].content
                 result["function_call_content"] = content_obj
