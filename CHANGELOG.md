@@ -4,6 +4,31 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [1.12.0] - 2026-09-15
+
+### ✨ Added (Voice AFK)
+- **`cogs/voice.py`**: New cog — Nova bisa masuk voice channel dan AFK di sana.
+  - `/afk` / `!afk` — Join voice channel, self-deafen, duduk manis
+  - `/unafk` / `!unafk` — Leave voice channel
+  - Activity status berubah otomatis: "AFK di #channel_name"
+- **`PyNaCl`** ditambahkan ke `requirements.txt` untuk voice support
+- **Voice intent** (`voice_states=True`) ditambahkan di `core/bot.py`
+
+### 🐛 Fixed
+- **`thought_signature` lost** (`services/gemini_client.py`): Compositional function calling gagal dengan `400 INVALID_ARGUMENT` karena `_rebuild_content_with_signatures` membuat Part baru yang tidak preserve thought_signature. Sekarang pass original content langsung.
+
+### 📁 File Changes
+```
+cogs/voice.py                  # NEW: Voice AFK cog
+requirements.txt               # +PyNaCl
+core/bot.py                    # +voice_states intent
+main.py                        # +load cogs.voice
+config/prompts/personality.txt # +voice AFK docs
+services/gemini_client.py      # thought_signature fix (hapus _rebuild_content)
+```
+
+---
+
 ## [1.11.0] - 2026-09-15
 
 ### 🐛 Fixed (18 bugs — deep scan)

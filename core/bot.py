@@ -15,6 +15,7 @@ def create_bot():
     intents.messages = True
     intents.members = True
     intents.presences = True
+    intents.voice_states = True
 
     if settings.BOT_PREFIXES:
         prefixes = settings.BOT_PREFIXES

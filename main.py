@@ -79,7 +79,7 @@ async def main():
     )
     bot.message_handler = message_handler
 
-    for ext in ("cogs.ai_commands", "cogs.admin_commands", "cogs.dynamic_presence", "cogs.slash_commands"):
+    for ext in ("cogs.ai_commands", "cogs.admin_commands", "cogs.dynamic_presence", "cogs.slash_commands", "cogs.voice"):
         await bot.load_extension(ext)
     logger.info("Slash commands loaded!")
 

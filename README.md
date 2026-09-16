@@ -63,6 +63,12 @@ Nova adalah bot Discord AI dengan kepribadian tsundere feminim yang didukung ole
 - **Generic Error Messages** — Slash commands tidak lagi leak internal error details ke users
 - **Memory Bounds** — Session caches (500) dan tracker dicts (200/channel) di-evict otomatis
 
+### 🎤 Voice AFK
+- **`/afk`** — Nova join voice channel dan AFK di sana (self-deafen)
+- **`/unafk`** — Nova keluar dari voice channel
+- **Activity Status** — Berubah otomatis ke "AFK di #channel_name" saat masuk voice
+- **Permission Check** — Cek `Connect` + `Speak` sebelum join
+
 ---
 
 ## ⚙️ Configuration
@@ -188,7 +194,8 @@ discord-ai-bot/
 │   ├── ai_commands.py       # Prefix AI commands
 │   ├── admin_commands.py    # Admin management
 │   ├── dynamic_presence.py  # Rotating bot status
-│   └── slash_commands.py    # All slash commands
+│   ├── slash_commands.py    # All slash commands
+│   └── voice.py             # Voice AFK commands
 ├── core/                    # Bot core logic
 │   ├── bot.py               # Bot setup & intents
 │   ├── context_builder.py   # System prompt builder
