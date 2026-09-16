@@ -168,28 +168,6 @@ class Voice(commands.Cog):
         )
 
 
-    @commands.Cog.listener()
-    async def on_voice_state_update(self, member, before, after):
-        """Auto-disconnect kalau bot sendirian di voice channel (semua user sudah keluar)."""
-        if member.bot:
-            return
-
-        vc = member.guild.voice_client
-        if not vc:
-            return
-
-        # Cek apakah masih ada non-bot member di channel
-        humans = [m for m in vc.channel.members if not m.bot]
-        if not humans:
-            channel_name = vc.channel.name
-            logger.info(f"Voice: no humans left in {channel_name}, disconnecting")
-            await vc.disconnect()
-            await self.bot.change_presence(
-                activity=discord.Activity(
-                    type=discord.ActivityType.listening,
-                    name="your messages | !commands",
-                )
-            )
 
 
 async def setup(bot):
