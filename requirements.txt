@@ -1,4 +1,4 @@
-discord.py>=2.7.1
+discord.py[voice]>=2.7.1
 python-dotenv>=1.2.3
 google-genai>=2.22.0
 groq>=1.7.0
@@ -9,4 +9,3 @@ tiktoken
 rich
 aiohttp>=3.9.0
 pytz
-PyNaCl>=1.5.0
