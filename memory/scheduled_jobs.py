@@ -1,11 +1,38 @@
 import asyncio
-import os
 import json
+import os
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 from utils.logger import get_logger
+from utils.time_utils import WIB
 
 logger = get_logger(__name__)
+
+SHOLAT_CONFIG_FILE = None  # Will be set from Settings.DATA_DIR
+
+
+def _get_config_path():
+    global SHOLAT_CONFIG_FILE
+    if SHOLAT_CONFIG_FILE is None:
+        from config.settings import Settings
+        SHOLAT_CONFIG_FILE = str(Path(Settings.DATA_DIR) / "sholat_config.json")
+    return SHOLAT_CONFIG_FILE
+
+
+def load_sholat_config() -> dict:
+    try:
+        with open(_get_config_path(), "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def save_sholat_config(config: dict):
+    config_path = _get_config_path()
+    os.makedirs(os.path.dirname(config_path), exist_ok=True)
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2, ensure_ascii=False)
 
 
 class ScheduledJobs:
@@ -15,6 +42,12 @@ class ScheduledJobs:
         self.github_backup = github_backup
         self.running = False
         self.last_prune_time = None
+        # Sholat reminder
+        self.sholat_client = None
+        self._reminded_today: set[str] = set()
+        self._reminder_date: str | None = None
+        self._today_schedule: dict[str, str] | None = None
+        self._schedule_fetch_date: str | None = None
 
     async def start(self):
         if self.running:
@@ -42,6 +75,10 @@ class ScheduledJobs:
                 ):
                     await self.run_cleanup_history()
                     last_history_cleanup = now
+
+                # Sholat reminder: bandingkan dalam WIB agar cocok dengan API.
+                now_wib = datetime.now(WIB)
+                await self._check_sholat_reminder(now_wib)
             except Exception as e:
                 logger.error(f"Prune loop error: {e}")
 
@@ -58,7 +95,7 @@ class ScheduledJobs:
                 logger.info("No memories directory found")
                 return
 
-            cutoff_days = int(os.getenv("TTL_PRUNE_DAYS", "30"))
+            cutoff_days = int(os.getenv("TTL_PRUNE_DAYS", str(self.settings.NUGGETS_TTL_DAYS)))
             cutoff_time = time.time() - (cutoff_days * 86400)
 
             for filename in os.listdir(memories_dir):
@@ -174,6 +211,100 @@ class ScheduledJobs:
                 return None
         return None
 
+    # --- Sholat Reminder ---
+
+    async def _check_sholat_reminder(self, now: datetime):
+        """Cek apakah waktunya kirim reminder sholat."""
+        if not self.sholat_client or not self.sholat_client.enabled:
+            return
+
+        sholat_config = load_sholat_config()
+        if not sholat_config.get("enabled") or not sholat_config.get("channel_id"):
+            return
+
+        # Reset reminded set jika tanggal berubah
+        today_str = now.strftime("%Y-%m-%d")
+        if self._reminder_date != today_str:
+            self._reminded_today.clear()
+            self._today_schedule = None
+            self._schedule_fetch_date = None
+            self._reminder_date = today_str
+
+        # Fetch jadwal hari ini (cached)
+        if self._schedule_fetch_date != today_str:
+            self._today_schedule = self.sholat_client.get_today_prayer_times()
+            self._schedule_fetch_date = today_str
+
+        if not self._today_schedule:
+            return
+
+        # Cek setiap waktu sholat
+        reminder_minutes = self.sholat_client.settings.SHOLAT_REMINDER_MINUTES
+        from services.sholat_client import REMINDER_PRAYERS, PRAYER_NAMES
+
+        for prayer_key in REMINDER_PRAYERS:
+            if prayer_key in self._reminded_today:
+                continue
+
+            time_str = self._today_schedule.get(prayer_key, "")
+            if not time_str:
+                continue
+
+            # Parse waktu sholat ke datetime hari ini
+            try:
+                h, m = map(int, time_str.split(":"))
+                prayer_dt = now.replace(hour=h, minute=m, second=0, microsecond=0)
+            except (ValueError, AttributeError):
+                continue
+
+            # Cek apakah kita dalam window reminder (N menit sebelum sholat)
+            diff = prayer_dt - now
+            diff_minutes = diff.total_seconds() / 60
+
+            if 0 <= diff_minutes <= reminder_minutes:
+                await self._send_sholat_reminder(
+                    prayer_key, PRAYER_NAMES.get(prayer_key, prayer_key),
+                    time_str, reminder_minutes, sholat_config
+                )
+                self._reminded_today.add(prayer_key)
+
+    async def _send_sholat_reminder(
+        self, prayer_key: str, prayer_name: str, time_str: str,
+        minutes_left: int, sholat_config: dict
+    ):
+        """Kirim reminder sholat ke channel yang dikonfigurasi."""
+        try:
+            # Generate pesan via Gemini
+            message = await self.sholat_client.generate_reminder(
+                prayer_name, time_str, minutes_left
+            )
+
+            # Tambah role mention jika dikonfigurasi — fallback ke SHOLAT_ROLE_ID dari env
+            role_id = sholat_config.get("role_id") or getattr(self.sholat_client.settings, "SHOLAT_ROLE_ID", 0)
+            if role_id:
+                message = f"<@&{role_id}> {message}"
+
+            channel_id = sholat_config.get("channel_id")
+            if not channel_id:
+                return
+
+            # Kirim via bot
+            bot = getattr(self.sholat_client, "_bot", None)
+            if not bot:
+                logger.warning("Bot reference not set on sholat_client — cannot send reminder")
+                return
+
+            channel = bot.get_channel(channel_id)
+            if not channel:
+                logger.warning(f"Sholat reminder channel {channel_id} not found")
+                return
+
+            await channel.send(message)
+            logger.info(f"Sholat reminder sent: {prayer_name} to #{channel.name}")
+
+        except Exception as e:
+            logger.error(f"Failed to send sholat reminder: {e}")
+
     def get_status(self):
         return {
             "running": self.running,
@@ -182,7 +313,7 @@ class ScheduledJobs:
         }
 
     def _get_next_prune_time(self):
-        now = datetime.now()
+        now = datetime.now(WIB)
         next_prune = now.replace(hour=3, minute=0, second=0, microsecond=0)
         if next_prune <= now:
             next_prune += timedelta(days=1)

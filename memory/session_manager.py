@@ -1,3 +1,4 @@
+import asyncio
 import time
 from collections import defaultdict
 from config.settings import Settings
@@ -71,7 +72,8 @@ class SessionManager:
         self.hydrate_from_disk(key)
         return self.token_counts[key] / self.settings.GEMINI_CONTEXT_LIMIT
 
-    def replace_history(self, key, summary, tail_keep=4):
+    async def replace_history(self, key, summary, tail_keep=4):
+        self.hydrate_from_disk(key)
         summary_tokens = token_counter.count_tokens(summary)
         existing = self.sessions[key]
         tail = existing[-tail_keep:] if len(existing) > tail_keep else list(existing)
@@ -86,21 +88,26 @@ class SessionManager:
         self.token_counts[key] = sum(m["tokens"] for m in new_session)
         self.last_activity[key] = time.time()
         if self.history_store:
-            self.history_store.clear(key)
-            self.history_store.append_message(
-                key, 0, "system", summary_entry["content"]
+            # File I/O di thread agar event loop tidak ke-block (compaction).
+            await asyncio.to_thread(self._flush_history_sync, key, summary_entry, tail)
+
+    def _flush_history_sync(self, key, summary_entry, tail):
+        """Write compaction result to disk (called via to_thread)."""
+        self.history_store.clear(key)
+        self.history_store.append_message(
+            key, 0, "system", summary_entry["content"]
+        )
+        for tail_msg in tail:
+            ts = tail_msg.get("timestamp", time.time())
+            self.history_store.append(
+                key,
+                {
+                    "user_id": 0,
+                    "role": tail_msg["role"],
+                    "content": tail_msg["content"],
+                    "timestamp": ts,
+                },
             )
-            for tail_msg in tail:
-                ts = tail_msg.get("timestamp", time.time())
-                self.history_store.append(
-                    key,
-                    {
-                        "user_id": 0,
-                        "role": tail_msg["role"],
-                        "content": tail_msg["content"],
-                        "timestamp": ts,
-                    },
-                )
 
     def clear(self, key):
         self.sessions[key] = []
@@ -119,8 +126,8 @@ class SessionManager:
     def _evict_if_needed(self):
         if len(self.sessions) <= self.MAX_SESSIONS:
             return
-        # Evict oldest half by last_activity
-        sorted_keys = sorted(self.last_activity, key=self.last_activity.get)
+        # Evict oldest half by last_activity — gunakan keys dari sessions, bukan last_activity.
+        sorted_keys = sorted(self.sessions.keys(), key=lambda k: self.last_activity.get(k, 0))
         evict_count = len(self.sessions) - self.MAX_SESSIONS // 2
         for key in sorted_keys[:evict_count]:
             self.sessions.pop(key, None)

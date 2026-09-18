@@ -42,17 +42,18 @@ class AICommands(commands.Cog):
                 if session_manager:
                     session_manager.add_message(channel_key, "user", question)
                     hist = session_manager.get_history(channel_key)[:-1]
-                    history = [
-                        {"role": m["role"], "parts": [{"text": m["content"]}]}
-                        for m in hist[-20:] if m["role"] in ("user", "model", "system")
-                    ]
+                    history = []
+                    for m in hist[-20:]:
+                        role = "model" if m.get("role") == "assistant" else m.get("role")
+                        if role in ("user", "model"):
+                            history.append({"role": role, "parts": [{"text": m.get("content", "")}]})
                 if history_store:
-                    history_store.append_message(channel_key, ctx.author.id, "user", question)
+                    await history_store.aappend_message(channel_key, ctx.author.id, "user", question)
                 response = await gemini.generate(question, system_instruction=system_prompt, history=history or None)
                 if session_manager:
                     session_manager.add_message(channel_key, "assistant", response)
                 if history_store:
-                    history_store.append_message(channel_key, ctx.author.id, "assistant", response)
+                    await history_store.aappend_message(channel_key, ctx.author.id, "assistant", response)
             # Discord limit 2000 char — potong aman.
             for chunk in [response[i:i + 1900] for i in range(0, len(response), 1900)] or ["(empty)"]:
                 await ctx.send(chunk)

@@ -22,6 +22,8 @@ def _fact_hash(fact: str) -> str:
 
 
 class RagStore:
+    MAX_LOCKS = 500
+
     def __init__(self, settings: Settings):
         self.settings = settings
         self.base_dir = settings.MEMORIES_DIR
@@ -30,6 +32,13 @@ class RagStore:
     def _get_lock(self, channel_id) -> asyncio.Lock:
         key = str(channel_id)
         if key not in self._channel_locks:
+            # Evict LRU bila melebihi batas — skip lock yang masih aktif (locked())
+            if len(self._channel_locks) >= self.MAX_LOCKS:
+                for k in list(self._channel_locks.keys()):
+                    lock = self._channel_locks[k]
+                    if not lock.locked():
+                        del self._channel_locks[k]
+                        break
             self._channel_locks[key] = asyncio.Lock()
         return self._channel_locks[key]
 
@@ -92,14 +101,25 @@ class RagStore:
 
             for nugget in nuggets:
                 try:
-                    raw = nugget["expiry"].replace("Z", "+00:00")
-                    expiry = datetime.fromisoformat(raw)
+                    if "expiry" in nugget and nugget["expiry"]:
+                        raw = nugget["expiry"].replace("Z", "+00:00")
+                        expiry = datetime.fromisoformat(raw)
+                    elif "timestamp" in nugget or "created_at" in nugget:
+                        raw_ts = (nugget.get("timestamp") or nugget.get("created_at")).replace("Z", "+00:00")
+                        created = datetime.fromisoformat(raw_ts)
+                        expiry = created + timedelta(days=self.settings.NUGGETS_TTL_DAYS)
+                    else:
+                        # Jangan hapus nugget legacy yang tidak punya timestamp
+                        valid.append(nugget)
+                        continue
+
                     if expiry.tzinfo is None:
                         expiry = expiry.replace(tzinfo=timezone.utc)
                     if expiry > now:
                         valid.append(nugget)
                 except (KeyError, ValueError):
-                    continue
+                    # Jika gagal parsing, simpan daripada hilang diam-diam
+                    valid.append(nugget)
 
             if len(valid) < len(nuggets):
                 path = self._get_file_path(channel_id)
@@ -126,7 +146,8 @@ class RagStore:
         return self.load(channel_id)
 
     async def aget_all(self, channel_id):
-        return await asyncio.to_thread(self.load, channel_id)
+        async with self._get_lock(channel_id):
+            return await asyncio.to_thread(self.load, channel_id)
 
     def list_channels(self):
         return [f.stem.replace("channel_", "") for f in self.base_dir.glob("channel_*.jsonl")]

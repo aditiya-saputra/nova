@@ -51,15 +51,23 @@ def from_iso(iso_string):
         return None
 
 
+def _as_utc(dt):
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def is_expired(expiry_string):
-    expiry = from_iso(expiry_string)
+    expiry = _as_utc(from_iso(expiry_string))
     if not expiry:
         return True
     return get_timestamp() > expiry
 
 
 def time_until_expiry(expiry_string):
-    expiry = from_iso(expiry_string)
+    expiry = _as_utc(from_iso(expiry_string))
     if not expiry:
         return timedelta(0)
     delta = expiry - get_timestamp()
@@ -87,5 +95,5 @@ def is_recent(timestamp_string, seconds=3600):
     ts = from_iso(timestamp_string)
     if not ts:
         return False
-    delta = get_timestamp() - ts
-    return delta.total_seconds() <= seconds
+    delta = (get_timestamp() - _as_utc(ts)).total_seconds()
+    return 0 <= delta <= seconds

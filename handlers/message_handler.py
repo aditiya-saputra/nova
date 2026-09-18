@@ -33,10 +33,13 @@ async def _bg_await(coro, label="bg"):
         logger.error(f"Background {label} error: {e}")
 
 
-def _spawn(coro, label="bg"):
+def _spawn(coro, label="bg", task_set=None):
     try:
         loop = asyncio.get_running_loop()
-        loop.create_task(_bg_await(coro, label))
+        task = loop.create_task(_bg_await(coro, label))
+        if task_set is not None:
+            task_set.add(task)
+            task.add_done_callback(task_set.discard)
     except RuntimeError:
         # Tidak ada loop berjalan (mis. saat shutdown/test) — skip aman.
         logger.error(f"No running loop for background {label}")
@@ -47,6 +50,8 @@ def _to_gemini_history(session_history):
     for msg in session_history[-HISTORY_BUDGET:]:
         role = msg.get("role")
         content = msg.get("content", "")
+        if role == "assistant":
+            role = "model"
         if role not in ("user", "model"):
             continue
         out.append({"role": role, "parts": [{"text": content}]})
@@ -92,6 +97,7 @@ class MessageHandler:
         self._last_response_text = {}
         self._last_tool_result_fp = {}
         self._MAX_CHANNEL_TRACKERS = 200
+        self._bg_tasks: set = set()
 
     def cache_message(self, message):
         if message.author.bot:
@@ -152,19 +158,25 @@ class MessageHandler:
         rich.process_trigger(trigger_type, message.author.display_name, getattr(message.channel, "name", "DM"))
 
         start_time = time.time()
+        self._current_channel_id = message.channel.id
+        self._current_user_id = message.author.id
         response = ""
 
         async with message.channel.typing():
             # #1: Paralelkan I/O independen (VLM + RAG + compaction + URL fetch + file read) via gather.
-            image_analyses, relevant_facts, _, url_contexts, file_contents = await asyncio.gather(
-                self.attachments.analyze(
-                    image_attachments, content or "Deskripsikan gambar ini secara detail."
-                ),
+            gathered = await asyncio.gather(
+                self.attachments.analyze(image_attachments, content or "Deskripsikan gambar ini secara detail."),
                 self._retrieve_facts(content, message.channel.id),
                 self.compaction_engine.check_and_compact(channel_key, user_id),
-                self._fetch_url_contexts(urls),
+                self._fetch_url_contexts(urls, message.channel.id, message.author.id),
                 self.file_processor.read_attachments(file_attachments),
+                return_exceptions=True,
             )
+            image_analyses, relevant_facts, _, url_contexts, file_contents = gathered
+            if isinstance(image_analyses, Exception): image_analyses = []
+            if isinstance(relevant_facts, Exception): relevant_facts = []
+            if isinstance(url_contexts, Exception): url_contexts = []
+            if isinstance(file_contents, Exception): file_contents = []
 
             self.session_manager.add_message(channel_key, "user", content)
             await self.history_store.aappend_message(channel_key, user_id, "user", content)
@@ -175,12 +187,12 @@ class MessageHandler:
                 if not hasattr(self.bot, "_file_attachment_cache"):
                     self.bot._file_attachment_cache = {}
                 self.bot._file_attachment_cache[cache_key] = file_contents
-                # Cleanup cache lama (> 100 entries)
+                # Cleanup cache lama (> 100 entries) — FIFO via reversed keys.
                 cache = self.bot._file_attachment_cache
                 if len(cache) > 100:
-                    oldest_keys = list(cache.keys())[:50]
+                    oldest_keys = list(cache.keys())[:len(cache) - 50]
                     for k in oldest_keys:
-                        del cache[k]
+                        cache.pop(k, None)
 
             try:
                 system_prompt = self.context_builder.build_system_prompt(metadata, relevant_facts)
@@ -226,7 +238,7 @@ class MessageHandler:
                             "channel_id": message.channel.id,
                             "tool_name": tc["tool"],
                             "tool_args": tc["args"],
-                        }), "tool_call")
+                        }), "tool_call", self._bg_tasks)
 
                     # Anti-repeat check: skip bila tool call identik dengan turn sebelumnya
                     if len(tool_calls) == 1:
@@ -288,7 +300,7 @@ class MessageHandler:
 
             except Exception as e:
                 logger.error(f"Error processing message: {e}")
-                response = f"Error: {str(e)}"
+                response = "Hmph! Terjadi kesalahan saat memproses pesan. Coba lagi nanti, baka!"
                 await self.audit_logger.log_error("message_processing", str(e), {"channel_id": message.channel.id})
 
             # Guard: Gemini thinking-only (text kosong + thoughtsignature) → jangan
@@ -322,7 +334,7 @@ class MessageHandler:
         # #2: non-kritis jadi background (tidak block return handle).
         _spawn(self.audit_logger.log_response(
             message.channel.id, len(response), latency, len(response.split())
-        ), "log_response")
+        ), "log_response", self._bg_tasks)
 
         try:
             presence = self.bot.get_cog("DynamicPresence") if hasattr(self.bot, "get_cog") else None
@@ -337,13 +349,13 @@ class MessageHandler:
                 extract_prompt = self.context_builder.build_rag_extract_prompt(content, response, metadata)
                 _spawn(self.fact_extractor.extract_and_save(
                     extract_prompt, message.channel.id, user_id, message.id
-                ), "rag_extract")
+                ), "rag_extract", self._bg_tasks)
             except Exception as e:
                 logger.error(f"RAG extract spawn error: {e}")
 
         try:
             if self.github_backup.increment_counter():
-                _spawn(self._backup_and_log(), "github_backup")
+                _spawn(self._backup_and_log(), "github_backup", self._bg_tasks)
         except Exception as e:
             logger.error(f"Backup spawn error: {e}")
 
@@ -390,7 +402,7 @@ class MessageHandler:
                 "tool_name": tc["tool"],
                 "result_length": len(str(result)),
                 "success": not str(result).startswith("Error"),
-            }), "tool_result")
+            }), "tool_result", self._bg_tasks)
             self._last_tool_calls[channel_key] = {"tool": tc["tool"], "args": tc["args"]}
             self._last_tool_result_fp[channel_key] = {
                 "tool": tc["tool"],
@@ -443,7 +455,7 @@ class MessageHandler:
                         "channel_id": message.channel.id,
                         "tool_name": tc["tool"],
                         "tool_args": tc["args"],
-                    }), "tool_call")
+                    }), "tool_call", self._bg_tasks)
 
                 try:
                     more_raw = await asyncio.wait_for(
@@ -462,7 +474,7 @@ class MessageHandler:
                         "tool_name": tc["tool"],
                         "result_length": len(str(result)),
                         "success": not str(result).startswith("Error"),
-                    }), "tool_result")
+                    }), "tool_result", self._bg_tasks)
 
         # Fallback: loop ended without text response → synthesize from last tool_results
         if not (response or "").strip() and tool_results:
@@ -492,7 +504,7 @@ class MessageHandler:
         except Exception:
             return []
 
-    async def _fetch_url_contexts(self, urls):
+    async def _fetch_url_contexts(self, urls, channel_id=None, user_id=None):
         """Auto-fetch URL di pesan (max MAX_AUTO_URLS) via ToolExecutor.
 
         Hasil segar di-injeksi ke prompt agar jawaban tidak basi dari RAG lama.
@@ -503,7 +515,11 @@ class MessageHandler:
 
         async def _fetch_one(url):
             try:
-                result = await self.tool_executor.execute("fetch_webpage", {"url": url})
+                result = await self.tool_executor.execute(
+                    "fetch_webpage", {"url": url},
+                    channel_id=getattr(self, "_current_channel_id", None),
+                    user_id=getattr(self, "_current_user_id", None),
+                )
                 if result.get("success") and (result.get("content") or "").strip():
                     text = result["content"][:URL_CONTEXT_CHARS]
                     return {
@@ -523,6 +539,7 @@ class MessageHandler:
 
     @staticmethod
     def _build_final_prompt(content, image_analyses, url_contexts=None, file_contents=None):
+        from handlers.file_processor import FileProcessor
         out = content or "User mengirim gambar/link/file tanpa teks."
         if image_analyses:
             out += "\n\n[Image Attachments Analyzed by Nova VLM]:\n"
@@ -533,10 +550,11 @@ class MessageHandler:
             for ctx in url_contexts:
                 out += f"\n--- URL: {ctx['url']} ---\nTitle: {ctx.get('title', '')}\n{ctx['content']}\n"
         if file_contents:
-            out += "\n\n[Uploaded File Content — GUNAKAN INI sebagai referensi utama untuk menjawab tentang isi file]:\n"
-            for fc in file_contents:
-                trunc_note = " (truncated)" if fc.get("truncated") else ""
-                out += f"\n--- File: {fc['filename']}{trunc_note} ({fc['size']} bytes) ---\n{fc['content']}\n--- End: {fc['filename']} ---\n"
+            # Gunakan format_for_prompt() untuk enforce MAX_TOTAL_CHARS limit
+            formatted = FileProcessor.format_for_prompt(file_contents)
+            if formatted:
+                out += "\n\n[Uploaded File Content — GUNAKAN INI sebagai referensi utama untuk menjawab tentang isi file]:\n"
+                out += formatted + "\n"
         return out
 
     @staticmethod
@@ -577,11 +595,18 @@ class MessageHandler:
         return False
 
     def _evict_trackers_if_needed(self):
+        # Evict secara konsisten: kumpulkan semua keys, sort by recency, lalu hapus dari semua dict
+        all_keys = set()
         for d in (self._last_tool_calls, self._last_response_text, self._last_tool_result_fp):
-            if len(d) > self._MAX_CHANNEL_TRACKERS:
-                keys = list(d.keys())[:len(d) - self._MAX_CHANNEL_TRACKERS // 2]
-                for k in keys:
-                    d.pop(k, None)
+            all_keys.update(d.keys())
+
+        if len(all_keys) > self._MAX_CHANNEL_TRACKERS:
+            # Sort keys — yang paling lama dihapus duluan
+            keys_to_remove = sorted(all_keys)[:len(all_keys) - self._MAX_CHANNEL_TRACKERS // 2]
+            for k in keys_to_remove:
+                self._last_tool_calls.pop(k, None)
+                self._last_response_text.pop(k, None)
+                self._last_tool_result_fp.pop(k, None)
 
     @staticmethod
     def _build_reaction_prompt(content, last_assistant):

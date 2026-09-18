@@ -29,6 +29,8 @@ class GeminiClient:
         # resolver DNS aiodns/aiohttp yang rusak di sebagian environment Windows
         # ("Could not contact DNS servers") — httpx memakai resolver OS yang normal.
         self._async_http = httpx.AsyncClient(timeout=120)
+        # #1: lock untuk key rotation agar tidak race condition saat concurrent calls.
+        self._key_lock = asyncio.Lock()
 
     def _is_not_found_error(self, e):
         code = getattr(e, "code", None) or getattr(e, "status_code", None)
@@ -74,12 +76,13 @@ class GeminiClient:
         logger.info(f"Gemini model chain check OK: available={available}"
                     + (f", missing={missing}" if missing else ""))
 
-    def _get_next_key(self):
-        if not self.keys:
-            raise ValueError("No Gemini API keys configured")
-        key = self.keys[self.current_index]
-        self.current_index = (self.current_index + 1) % len(self.keys)
-        return key
+    async def _get_next_key(self):
+        async with self._key_lock:
+            if not self.keys:
+                raise ValueError("No Gemini API keys configured")
+            key = self.keys[self.current_index]
+            self.current_index = (self.current_index + 1) % len(self.keys)
+            return key
 
     def _get_client(self, api_key):
         # #3: reuse client per key (genai.Client menyimpan httpx connection pool).
@@ -142,12 +145,15 @@ class GeminiClient:
         return ""
 
     async def _run_with_fallback(self, fn, label_prefix=""):
+        if not self.keys:
+            raise ValueError("No Gemini API keys configured — set GEMINI_API_KEYS in .env")
+
         last_error = None
         primary_model = self.model_chain[0] if self.model_chain else self.model_name
         for model in self.model_chain:
             logger.info(f"Trying model: {model}")
             for attempt in range(len(self.keys)):
-                api_key = self._get_next_key()
+                api_key = await self._get_next_key()
                 try:
                     result = await fn(api_key, model)
                     if model != primary_model:
@@ -461,12 +467,12 @@ RULES:
     async def generate_with_images(self, prompt, images, system_instruction=None):
         config = self._build_config(system_instruction)
         contents = []
-        contents.append(types.Part(text=prompt))
+        contents.append(types.Part.from_text(text=prompt))
         for img in images:
-            contents.append(types.Part(inline_data=types.Blob(
+            contents.append(types.Part.from_bytes(
+                data=img["data"],
                 mime_type=img["mime_type"],
-                data=img["data"]
-            )))
+            ))
 
         async def _call(api_key, model):
             client = self._get_client(api_key)

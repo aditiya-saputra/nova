@@ -1,6 +1,6 @@
 # Nova - Tsundere AI Discord Bot
 
-Nova adalah bot Discord AI dengan kepribadian tsundere feminim yang didukung oleh Google Gemini, Groq, Tavily, Hyperbrowser, dan Browserless. Bot ini memiliki berbagai fitur canggih seperti VLM (Vision Language Model), Micro-RAG memory, auto-mention, audit logging, dan automatic GitHub backup.
+Nova adalah bot Discord AI dengan kepribadian tsundere feminim yang didukung oleh Google Gemini, Groq, Tavily, dan Browserless. Bot ini memiliki berbagai fitur canggih seperti VLM (Vision Language Model), Micro-RAG memory, auto-mention, audit logging, dan automatic GitHub backup.
 
 ---
 
@@ -19,9 +19,7 @@ Nova adalah bot Discord AI dengan kepribadian tsundere feminim yang didukung ole
 
 ### 🌐 Web Fetching & Search
 - **Tavily Web Search** - Search real-time data di internet
-- **Hyperbrowser Integration** - Primary web fetch & screenshot provider dengan JS rendering
-- **Browserless Integration** - Fallback web fetch & sanitize webpage content dengan prompt injection protection
-- **Provider Fallback** - Auto-fallback Hyperbrowser → Browserless (configurable via `FETCH_PROVIDER`)
+- **Browserless Integration** - Fetch & sanitize webpage content dengan prompt injection protection
 
 ### 🔔 Auto-Mention System
 - **Presence Tracking** - Otomatis deteksi saat user online
@@ -126,11 +124,11 @@ Catatan:
 | `/ask` | Tanya sesuatu ke Nova |
 | `/recall` | Cari fakta/memori tersimpan di channel |
 | `/forget` | Hapus semua ingatan Nova di channel (memori RAG + riwayat) — admin |
-| `/history` | Lihat riwayat percakapan (manage_messages) |
-| `/deleted` | Lihat log pesan yang dihapus (manage_messages) |
-| `/audit` | Lihat audit log bot (manage_messages) |
-| `/send` | Kirim pesan ke channel tertentu (manage_messages) |
-| `/welcome` | Sambut user back secara manual (manage_messages) |
+| `/history` | Lihat riwayat percakapan |
+| `/deleted` | Lihat log pesan yang dihapus |
+| `/audit` | Lihat audit log bot (deleted, edited, tool calls, errors) |
+| `/send` | Kirim pesan ke channel tertentu (admin) |
+| `/welcome` | Sambut user back secara manual |
 | `/optin` | Aktifkan auto-mention saat online |
 | `/optout` | Nonaktifkan auto-mention |
 | `/mystatus` | Cek status auto-mention kamu |
@@ -154,8 +152,7 @@ Catatan:
 - Google Gemini API Key
 - Groq API Key (opsional, untuk RAG)
 - Tavily API Key (opsional, untuk web search)
-- Hyperbrowser API Key (opsional, untuk web fetch & screenshot — default provider)
-- Browserless Token (opsional, fallback web fetch & screenshot)
+- Browserless Token (opsional, untuk web fetch & screenshot)
 
 ### 2. Install Dependencies
 ```bash
@@ -183,17 +180,13 @@ GROQ_API_KEY=your_groq_api_key
 # Tavily API
 TAVILY_API_KEY=your_tavily_api_key
 
-# Browserless (fallback provider)
+# Browserless
 BROWSERLESS_URL=https://chrome.browserless.io
 BROWSERLESS_TOKEN=your_browserless_token
 
-# Hyperbrowser (primary provider)
-HYPERBROWSER_API_KEY=your_hyperbrowser_api_key
-FETCH_PROVIDER=auto  # auto | hyperbrowser | browserless
-
 # GitHub Backup
 GITHUB_TOKEN=your_github_token
-GITHUB_BACKUP_REPO=username/repo-name
+GITHUB_REPO=username/repo-name
 
 # Auto-Mention
 WELCOME_ENABLED=true
@@ -283,16 +276,13 @@ discord-ai-bot/
 
 ## 🛡️ Safety & Security
 
-- **Prompt Injection Protection** - Content dari Browserless/Hyperbrowser di-sanitize (strip HTML, script, iframe, injection patterns).
-- **Private IP Blocking** - SSRF guard memblokir request ke localhost / IP privat (IPv4 & IPv6 mapped).
-- **Audit Logging** - Semua aktivitas sensitif di-log ke `data/audit/audit.jsonl` dengan `threading.Lock` (race-free) dan timestamp UTC.
+- **Prompt Injection Protection** - Content dari Browserless di-sanitize (strip HTML, script, iframe, injection patterns).
+- **Private IP Blocking** - Browserless memblokir request ke localhost / IP privat.
+- **Audit Logging** - Semua aktivitas sensitif di-log ke `data/audit/audit.jsonl` dengan `asyncio.Lock` (race-free).
 - **Sensitive Data Filtering** - Token dan API keys disembunyikan dalam log.
 - **`.env` Hardening** - `.env` masuk `.gitignore` (override `.env.*` kecuali `.env.example`). Old secrets diarsipkan ke `secrets/.env.archive` (out-of-tree).
 - **RAG Nugget Dedup** - Fact baru di-hash (SHA1 normalized) sebelum disimpan; duplikat di skip.
-- **SSRF Guard** - URL validation: scheme whitelist + private IP blocklist + DNS rebinding check + injection regex.
-- **Audit Auth Required** - Tool `get_audit_logs` memerlukan `channel_id` dan `user_id` untuk otorisasi moderator/admin.
-- **File Content Limits** - Total file attachment dibatasi `MAX_TOTAL_CHARS=20000` per pesan.
-- **Safe Env Parsing** - Semua env vars numerik menggunakan `_safe_int`/`_safe_float` helper, tidak crash saat import.
+- **SSRF Guard** - URL validation di Browserless: scheme whitelist + private IP blocklist + injection regex.
 
 ---
 

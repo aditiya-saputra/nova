@@ -9,6 +9,14 @@ logger = get_logger(__name__)
 SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills"
 
 
+def _clamp_int(val, default, min_val=1, max_val=50):
+    try:
+        v = int(val)
+        return max(min_val, min(v, max_val))
+    except (TypeError, ValueError):
+        return default
+
+
 class ToolExecutor:
     def __init__(self, bot):
         self.bot = bot
@@ -228,33 +236,42 @@ class ToolExecutor:
 
     async def execute(self, tool_name, parameters, channel_id=None, user_id=None):
         try:
+            if not isinstance(parameters, dict):
+                parameters = {}
+
             if tool_name == "web_search":
                 return await self._web_search(parameters.get("query", ""))
             elif tool_name == "recall_memory":
+                limit = _clamp_int(parameters.get("limit", 5), 5, 1, 20)
                 return await self._recall_memory(
                     parameters.get("query", ""),
                     channel_id,
-                    parameters.get("limit", 5)
+                    limit
                 )
             elif tool_name == "get_history":
+                limit = _clamp_int(parameters.get("limit", 10), 10, 1, 30)
                 return await self._get_history(
                     channel_id,
-                    parameters.get("limit", 10)
+                    limit
                 )
             elif tool_name == "get_channel_info":
                 return await self._get_channel_info(channel_id)
             elif tool_name == "get_user_info":
                 return await self._get_user_info(parameters.get("user_id", ""))
             elif tool_name == "get_audit_logs":
+                limit = _clamp_int(parameters.get("limit", 10), 10, 1, 20)
                 return await self._get_audit_logs(
                     parameters.get("event_type", "all"),
-                    parameters.get("limit", 10)
+                    limit,
+                    channel_id=channel_id,
+                    user_id=user_id,
                 )
             elif tool_name == "fetch_webpage":
                 return await self._fetch_webpage(parameters.get("url", ""))
             elif tool_name == "get_online_users":
                 return await self._get_online_users(
-                    parameters.get("status_filter", "all")
+                    parameters.get("status_filter", "all"),
+                    channel_id=channel_id,
                 )
             elif tool_name == "analyze_image":
                 return await self._analyze_image(
@@ -275,13 +292,14 @@ class ToolExecutor:
                 return await self._list_skills()
             elif tool_name == "read_attachment":
                 return await self._read_attachment(
-                    parameters.get("filename", "")
+                    parameters.get("filename", ""),
+                    channel_id=channel_id,
                 )
             else:
                 return {"error": f"Unknown tool: {tool_name}"}
         except Exception as e:
             logger.error(f"Tool execution error: {tool_name} - {e}")
-            return {"error": str(e)}
+            return {"error": "Tool execution failed"}
 
     async def _web_search(self, query):
         tavily = self.bot.tavily
@@ -356,6 +374,8 @@ class ToolExecutor:
 
     async def _get_user_info(self, user_id):
         try:
+            if not str(user_id).isdigit():
+                return {"error": "Invalid user ID"}
             user = await self.bot.fetch_user(int(user_id))
             return {
                 "name": user.name,
@@ -367,10 +387,29 @@ class ToolExecutor:
         except Exception:
             return {"error": "User not found"}
 
-    async def _get_audit_logs(self, event_type="all", limit=10):
+    async def _get_audit_logs(self, event_type="all", limit=10, channel_id=None, user_id=None):
         audit_logger = self.bot.audit_logger
         if not audit_logger:
             return {"error": "Audit logger not configured"}
+
+        # Otorisasi: WAJIB ada channel_id DAN user_id, dan harus moderator/admin
+        if not channel_id or not user_id:
+            return {"error": "Akses ditolak: channel_id dan user_id diperlukan untuk otorisasi."}
+
+        channel = self.bot.get_channel(channel_id)
+        if not channel:
+            return {"error": "Channel not found"}
+
+        if not getattr(channel, "guild", None):
+            return {"error": "Akses ditolak: hanya di server Discord."}
+
+        member = channel.guild.get_member(user_id)
+        if not member or not (member.guild_permissions.manage_messages or member.guild_permissions.administrator):
+            return {"error": "Akses ditolak: hanya moderator atau admin yang dapat membaca audit logs."}
+
+        allowed_events = {"all", "message_deleted", "message_edited", "tool_call", "tool_result", "error"}
+        if event_type not in allowed_events:
+            event_type = "all"
 
         if event_type == "all":
             logs = await audit_logger.aget_recent_logs(limit=limit)
@@ -472,7 +511,7 @@ class ToolExecutor:
             logger.warning(f"Fetch via {type(provider).__name__} failed, trying next: {result.get('error')}")
         return last or {"error": "All fetch providers failed"}
 
-    async def _get_online_users(self, status_filter="all"):
+    async def _get_online_users(self, status_filter="all", channel_id=None):
         status_map = {
             "online": "online",
             "idle": "idle",
@@ -487,13 +526,22 @@ class ToolExecutor:
             "offline": [],
         }
 
-        for guild in self.bot.guilds:
+        guilds = []
+        if channel_id:
+            channel = self.bot.get_channel(channel_id)
+            if channel and getattr(channel, "guild", None):
+                guilds = [channel.guild]
+        if not guilds:
+            guilds = list(self.bot.guilds)[:1]
+
+        MAX_PER_STATUS = 25
+        for guild in guilds:
             for member in guild.members:
                 if member.bot:
                     continue
 
                 status = str(member.status)
-                if status in users_by_status:
+                if status in users_by_status and len(users_by_status[status]) < MAX_PER_STATUS:
                     users_by_status[status].append({
                         "name": member.display_name,
                         "id": member.id,
@@ -624,7 +672,7 @@ class ToolExecutor:
             "message": f"{len(skills)} skill(s) available"
         }
 
-    async def _read_attachment(self, filename):
+    async def _read_attachment(self, filename, channel_id=None):
         """Baca isi file attachment dari cache yang di-populate FileProcessor.
 
         File content di-cache per-message oleh MessageHandler saat pesan diterima.
@@ -638,23 +686,42 @@ class ToolExecutor:
         if not file_cache:
             return {"error": "No file attachments available. Upload a file and ask me to read it."}
 
-        # Cari file berdasarkan filename
-        for key, files in file_cache.items():
+        # Filter cache berdasarkan channel_id untuk mencegah kebocoran file lintas channel/server
+        target_cache = {}
+        if channel_id:
+            channel_prefix = f"{channel_id}_"
+            for k, v in file_cache.items():
+                if str(k).startswith(channel_prefix):
+                    target_cache[k] = v
+        else:
+            target_cache = file_cache
+
+        # Cache dict mempertahankan insertion order; entry terakhir adalah message terbaru.
+        found_in = None
+        found_fc = None
+        for key, files in reversed(list(target_cache.items())):
             for fc in files:
                 if fc.get("filename") == filename:
-                    content = fc.get("content", "")
-                    truncated = fc.get("truncated", False)
-                    result = {
-                        "filename": filename,
-                        "content": content,
-                        "size": fc.get("size", 0),
-                    }
-                    if truncated:
-                        result["note"] = "File content was truncated due to size limit."
-                    return result
+                    found_in = key
+                    found_fc = fc
+                    break
+            if found_fc:
+                break
+
+        if found_fc:
+            content = found_fc.get("content", "")
+            truncated = found_fc.get("truncated", False)
+            result = {
+                "filename": filename,
+                "content": content,
+                "size": found_fc.get("size", 0),
+            }
+            if truncated:
+                result["note"] = "File content was truncated due to size limit."
+            return result
 
         available = []
-        for files in file_cache.values():
+        for files in target_cache.values():
             for fc in files:
                 available.append(fc.get("filename", ""))
         return {

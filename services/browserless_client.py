@@ -124,13 +124,25 @@ class BrowserlessClient:
                 if kind == 'suffix' and (host_lower == value or host_lower.endswith('.' + value)):
                     return False, f"Access to {hostname} is blocked"
                 if kind == 'octet':
-                    # value seperti '10', '192.168', '172.16' — cocokkan dot-bounded
-                    # agar '10evil.com' tidak lolos via startswith naif, dan
-                    # '10.0.0.1.evil.com' tetap terdeteksi bila diawali oktet privat.
                     if host_lower == value or host_lower.startswith(value + "."):
                         return False, f"Access to {hostname} is blocked"
-                if kind == 'ipv6' and ':' in host_lower and host_lower == value.lower():
-                    return False, f"Access to {hostname} is blocked"
+                if kind == 'ipv6':
+                    # Strip IPv6 bracket wrappers: [::1] → ::1
+                    normalized = host_lower.strip('[]')
+                    if ':' in normalized and normalized == value.lower():
+                        return False, f"Access to {hostname} is blocked"
+                    # Also block mapped IPv4: ::ffff:127.0.0.1 etc.
+                    if 'ffff:' in normalized:
+                        parts = normalized.split('ffff:')
+                        if len(parts) > 1:
+                            mapped = parts[-1].strip(':')
+                            try:
+                                import ipaddress
+                                ipaddress.ip_address(mapped)
+                                if _ip_in_blocked(mapped):
+                                    return False, f"Access to {hostname} is blocked (mapped to {mapped})"
+                            except ValueError:
+                                pass
 
             if '.' not in host_lower:
                 return False, "Invalid hostname"

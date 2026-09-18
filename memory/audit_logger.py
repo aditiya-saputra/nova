@@ -3,7 +3,7 @@ import os
 import asyncio
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -27,7 +27,7 @@ class AuditLogger:
 
     async def log(self, event_type, data):
         entry = {
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "event": event_type,
             "data": data
         }
@@ -107,9 +107,10 @@ class AuditLogger:
         try:
             if os.path.exists(self.audit_file):
                 recent = deque(maxlen=limit)
-                with open(self.audit_file, "r", encoding="utf-8") as f:
-                    for line in f:
-                        recent.append(line)
+                with self._file_lock:
+                    with open(self.audit_file, "r", encoding="utf-8") as f:
+                        for line in f:
+                            recent.append(line)
                 for line in recent:
                     try:
                         logs.append(json.loads(line.strip()))
@@ -123,16 +124,20 @@ class AuditLogger:
         logs = []
         try:
             if os.path.exists(self.audit_file):
-                with open(self.audit_file, "r", encoding="utf-8") as f:
-                    for line in f:
-                        try:
-                            entry = json.loads(line.strip())
-                            if entry.get("event") == event_type:
-                                logs.append(entry)
-                                if len(logs) >= limit:
-                                    break
-                        except json.JSONDecodeError:
-                            continue
+                with self._file_lock:
+                    with open(self.audit_file, "r", encoding="utf-8") as f:
+                        all_lines = f.readlines()
+                # Ambil dari belakang (terbaru duluan), lalu reverse agar chronological
+                for line in reversed(all_lines):
+                    try:
+                        entry = json.loads(line.strip())
+                        if entry.get("event") == event_type:
+                            logs.append(entry)
+                            if len(logs) >= limit:
+                                break
+                    except json.JSONDecodeError:
+                        continue
+                logs.reverse()  # chronological order
         except Exception as e:
             logger.error(f"Error reading audit logs: {e}")
         return logs

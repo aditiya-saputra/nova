@@ -36,8 +36,8 @@ class Settings:
     GEMINI_API_KEYS = [k.strip() for k in os.getenv("GEMINI_API_KEYS", "").split(",") if k.strip()]
     GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
     GEMINI_FALLBACK_MODELS = [m.strip() for m in os.getenv("GEMINI_FALLBACK_MODELS", "gemini-flash-latest,gemini-flash-lite-latest").split(",") if m.strip()]
-    GEMINI_CONTEXT_LIMIT = int(os.getenv("GEMINI_CONTEXT_LIMIT", "1048576"))
-    GEMINI_OUTPUT_LIMIT = int(os.getenv("GEMINI_OUTPUT_LIMIT", "65536"))
+    GEMINI_CONTEXT_LIMIT = _safe_int(os.getenv("GEMINI_CONTEXT_LIMIT"), 1048576)
+    GEMINI_OUTPUT_LIMIT = _safe_int(os.getenv("GEMINI_OUTPUT_LIMIT"), 65536)
 
     GROQ_API_KEY = os.getenv("GROQ_API_KEY")
     GROQ_MODEL_HEAVY = os.getenv("GROQ_MODEL_HEAVY", "openai/gpt-oss-120b")
@@ -55,8 +55,8 @@ class Settings:
     COMPACTION_THRESHOLD = _safe_float(os.getenv("COMPACTION_THRESHOLD"), 0.80)
     COMPACTION_TARGET = _safe_float(os.getenv("COMPACTION_TARGET"), 0.20)
 
-    NUGGETS_TTL_DAYS = int(os.getenv("NUGGETS_TTL_DAYS", "3"))
-    NUGGETS_TOP_K = int(os.getenv("NUGGETS_TOP_K", "5"))
+    NUGGETS_TTL_DAYS = _safe_int(os.getenv("NUGGETS_TTL_DAYS"), 3)
+    NUGGETS_TOP_K = _safe_int(os.getenv("NUGGETS_TOP_K"), 5)
 
     BOT_PREFIXES = [p.strip() for p in os.getenv("BOT_PREFIX", "").split(",") if p.strip() and p.strip() not in (",",)]
 
@@ -72,3 +72,14 @@ class Settings:
     # Kanonis: GITHUB_BACKUP_REPO. Terima alias lama GITHUB_REPO agar tidak breaking.
     GITHUB_BACKUP_REPO = os.getenv("GITHUB_BACKUP_REPO", "") or os.getenv("GITHUB_REPO", "")
     GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
+
+    # Sholat (Jadwal Sholat Auto-Reminder)
+    SHOLAT_ENABLED = os.getenv("SHOLAT_ENABLED", "false").lower() == "true"
+    SHOLAT_CITY_ID = os.getenv("SHOLAT_CITY_ID", "")
+    SHOLAT_CITY_NAME = os.getenv("SHOLAT_CITY_NAME", "")
+    SHOLAT_LAT = _safe_float(os.getenv("SHOLAT_LAT"), 0.0)
+    SHOLAT_LNG = _safe_float(os.getenv("SHOLAT_LNG"), 0.0)
+    SHOLAT_METHOD = _safe_int(os.getenv("SHOLAT_METHOD"), 8)
+    SHOLAT_TIMEZONE = os.getenv("SHOLAT_TIMEZONE", "Asia/Jakarta")
+    SHOLAT_ROLE_ID = _safe_int(os.getenv("SHOLAT_ROLE_ID"), 0)
+    SHOLAT_REMINDER_MINUTES = _safe_int(os.getenv("SHOLAT_REMINDER_MINUTES"), 10)

@@ -5,12 +5,35 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+_opus_loaded = False
+
+
+def _ensure_opus() -> bool:
+    global _opus_loaded
+    if _opus_loaded:
+        return True
+    if discord.opus.is_loaded():
+        _opus_loaded = True
+        return True
+    try:
+        discord.opus.load_opus("libopus.so.0")
+        _opus_loaded = True
+        logger.info("Opus library loaded successfully")
+        return True
+    except Exception:
+        logger.warning(
+            "Opus library not found — voice commands will be disabled. "
+            "Install with: sudo apt install libopus-dev"
+        )
+        return False
+
 
 class Voice(commands.Cog):
     """Voice channel AFK — Nova duduk di voice channel tanpa ngapa-ngapain."""
 
     def __init__(self, bot):
         self.bot = bot
+        self._voice_available = _ensure_opus()
 
     @app_commands.command(name="afk", description="Nova masuk voice channel dan AFK di sana")
     @app_commands.describe(channel="Voice channel target (optional, default: channel kamu sekarang)")
@@ -20,6 +43,14 @@ class Voice(commands.Cog):
         channel: discord.VoiceChannel = None,
     ):
         await interaction.response.defer(ephemeral=True)
+
+        if not self._voice_available:
+            await interaction.followup.send(
+                "Voice nggak tersedia — opus library belum terinstall. "
+                "Minta admin install `libopus-dev` dulu ya!",
+                ephemeral=True,
+            )
+            return
 
         # Cek user sudah di voice channel
         if not interaction.user.voice or not interaction.user.voice.channel:
@@ -58,7 +89,7 @@ class Voice(commands.Cog):
         except Exception as e:
             logger.error(f"Voice join error: {e}")
             await interaction.followup.send(
-                f"Gagal masuk voice channel: {e}",
+                "Gagal masuk voice channel. Coba lagi nanti!",
                 ephemeral=True,
             )
             return
@@ -111,6 +142,13 @@ class Voice(commands.Cog):
     @commands.command(name="afk")
     async def afk_prefix(self, ctx):
         """Prefix command: !afk"""
+        if not self._voice_available:
+            await ctx.send(
+                "Voice nggak tersedia — opus library belum terinstall. "
+                "Minta admin install `libopus-dev` dulu ya!"
+            )
+            return
+
         if not ctx.author.voice or not ctx.author.voice.channel:
             await ctx.send("Masuk voice channel dulu dong, baka! (￣ω￣;)")
             return
@@ -131,7 +169,8 @@ class Voice(commands.Cog):
         try:
             await target.connect(self_deaf=True)
         except Exception as e:
-            await ctx.send(f"Gagal masuk voice channel: {e}")
+            logger.error(f"Voice join error: {e}")
+            await ctx.send("Gagal masuk voice channel. Coba lagi nanti!")
             return
 
         await self.bot.change_presence(

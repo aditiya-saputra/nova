@@ -1,4 +1,7 @@
+import asyncio
+import io
 import json
+import random
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -68,16 +71,18 @@ class SlashCommands(commands.Cog):
 
             prompt = f"{system_prompt}\n\nUser: {question}"
             history = session_manager.get_history(channel_key)[:-1]
-            history_payload = [
-                {"role": m["role"], "parts": [{"text": m["content"]}]}
-                for m in history[-20:]
-                if m["role"] in ("user", "model", "system")
-            ]
-            import asyncio as _asyncio
+            history_payload = []
+            for m in history[-20:]:
+                role = m.get("role")
+                if role == "assistant":
+                    role = "model"
+                if role in ("user", "model"):
+                    history_payload.append({"role": role, "parts": [{"text": m.get("content", "")}]})
+
             if history_payload:
-                response = await _asyncio.wait_for(gemini.generate(question, system_instruction=system_prompt, history=history_payload), timeout=45)
+                response = await asyncio.wait_for(gemini.generate(question, system_instruction=system_prompt, history=history_payload), timeout=45)
             else:
-                response = await _asyncio.wait_for(gemini.generate(question, system_instruction=system_prompt), timeout=45)
+                response = await asyncio.wait_for(gemini.generate(question, system_instruction=system_prompt), timeout=45)
 
             session_manager.add_message(channel_key, "assistant", response)
             await history_store.aappend_message(channel_key, user_id, "assistant", response)
@@ -168,6 +173,7 @@ class SlashCommands(commands.Cog):
             await interaction.followup.send("Terjadi kesalahan internal. Coba lagi nanti.", ephemeral=True)
 
     @app_commands.command(name="forget", description="Hapus semua ingatan Nova di channel ini (memori RAG + riwayat percakapan)")
+    @app_commands.checks.has_permissions(manage_messages=True)
     @app_commands.default_permissions(manage_messages=True)
     async def forget_slash(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
@@ -210,14 +216,17 @@ class SlashCommands(commands.Cog):
 
         except Exception as e:
             logger.error(f"Slash /forget error: {e}")
-            await interaction.followup.send(f"Error: {str(e)}", ephemeral=True)
+            await interaction.followup.send("Terjadi kesalahan saat menghapus memori.", ephemeral=True)
 
     @app_commands.command(name="history", description="View conversation history")
-    @app_commands.describe(limit="Number of messages to show (default: 10)")
+    @app_commands.checks.has_permissions(manage_messages=True)
+    @app_commands.default_permissions(manage_messages=True)
+    @app_commands.describe(limit="Number of messages to show (default: 10, max: 25)")
     async def history_slash(self, interaction: discord.Interaction, limit: int = 10):
         await interaction.response.defer(thinking=True)
 
         try:
+            limit = max(1, min(limit, 25))
             session_manager = self.bot.session_manager
             channel_key = f"channel_{interaction.channel_id}"
             history = session_manager.get_history(channel_key)
@@ -250,11 +259,14 @@ class SlashCommands(commands.Cog):
             await interaction.followup.send("Terjadi kesalahan internal. Coba lagi nanti.", ephemeral=True)
 
     @app_commands.command(name="deleted", description="View recently deleted messages")
-    @app_commands.describe(limit="Number of deleted messages to show (default: 10)")
+    @app_commands.checks.has_permissions(manage_messages=True)
+    @app_commands.default_permissions(manage_messages=True)
+    @app_commands.describe(limit="Number of deleted messages to show (default: 10, max: 20)")
     async def deleted_slash(self, interaction: discord.Interaction, limit: int = 10):
         await interaction.response.defer(thinking=True)
 
         try:
+            limit = max(1, min(limit, 20))
             audit_logger = self.bot.audit_logger
             logs = await audit_logger.aget_logs_by_type("message_deleted", limit=limit)
 
@@ -292,11 +304,14 @@ class SlashCommands(commands.Cog):
             await interaction.followup.send("Terjadi kesalahan internal. Coba lagi nanti.", ephemeral=True)
 
     @app_commands.command(name="audit", description="View audit logs")
-    @app_commands.describe(event_type="Event type: message_deleted, message_edited, tool_call, tool_result, error, all (default: all)", limit="Number of logs to show (default: 15)")
+    @app_commands.checks.has_permissions(manage_messages=True)
+    @app_commands.default_permissions(manage_messages=True)
+    @app_commands.describe(event_type="Event type: message_deleted, message_edited, tool_call, tool_result, error, all (default: all)", limit="Number of logs to show (default: 15, max: 20)")
     async def audit_slash(self, interaction: discord.Interaction, event_type: str = "all", limit: int = 15):
         await interaction.response.defer(thinking=True)
 
         try:
+            limit = max(1, min(limit, 20))
             audit_logger = self.bot.audit_logger
 
             if event_type == "all":
@@ -345,6 +360,8 @@ class SlashCommands(commands.Cog):
             await interaction.followup.send("Terjadi kesalahan internal. Coba lagi nanti.", ephemeral=True)
 
     @app_commands.command(name="send", description="Send a message to a channel with optional mention")
+    @app_commands.checks.has_permissions(manage_messages=True)
+    @app_commands.default_permissions(manage_messages=True)
     @app_commands.describe(
         channel="Target channel to send message",
         message="Message to send",
@@ -385,9 +402,11 @@ class SlashCommands(commands.Cog):
 
         except Exception as e:
             logger.error(f"Slash /send error: {e}")
-            await interaction.followup.send(f"Error: {str(e)}", ephemeral=True)
+            await interaction.followup.send("Gagal mengirim pesan ke channel tujuan.", ephemeral=True)
 
     @app_commands.command(name="welcome", description="Send welcome back message to a user in a channel")
+    @app_commands.checks.has_permissions(manage_messages=True)
+    @app_commands.default_permissions(manage_messages=True)
     @app_commands.describe(
         channel="Target channel",
         user="User to welcome back"
@@ -409,7 +428,6 @@ class SlashCommands(commands.Cog):
                 f"{user.mention} kok baru online sih? Aku gak kangen lho! ...jangan salah paham. (；一_一)"
             ]
 
-            import random
             chosen = random.choice(messages)
 
             await channel.send(chosen)
@@ -431,7 +449,7 @@ class SlashCommands(commands.Cog):
 
         except Exception as e:
             logger.error(f"Slash /welcome error: {e}")
-            await interaction.followup.send(f"Error: {str(e)}", ephemeral=True)
+            await interaction.followup.send("Gagal mengirim welcome message.", ephemeral=True)
 
     @app_commands.command(name="optin", description="Opt-in for auto-mention when you come online")
     @app_commands.describe(rate_limit="How often you want to be mentioned: 10m, 1h, 1d")
@@ -469,7 +487,7 @@ class SlashCommands(commands.Cog):
 
         except Exception as e:
             logger.error(f"Slash /optin error: {e}")
-            await interaction.followup.send(f"Error: {str(e)}", ephemeral=True)
+            await interaction.followup.send("Gagal memperbarui preferensi auto-mention.", ephemeral=True)
 
     @app_commands.command(name="optout", description="Opt-out from auto-mention")
     async def optout_slash(self, interaction: discord.Interaction):
@@ -493,7 +511,7 @@ class SlashCommands(commands.Cog):
 
         except Exception as e:
             logger.error(f"Slash /optout error: {e}")
-            await interaction.followup.send(f"Error: {str(e)}", ephemeral=True)
+            await interaction.followup.send("Gagal memperbarui preferensi auto-mention.", ephemeral=True)
 
     @app_commands.command(name="mystatus", description="Check your mention settings")
     async def mystatus_slash(self, interaction: discord.Interaction):
@@ -522,7 +540,7 @@ class SlashCommands(commands.Cog):
 
         except Exception as e:
             logger.error(f"Slash /mystatus error: {e}")
-            await interaction.followup.send(f"Error: {str(e)}", ephemeral=True)
+            await interaction.followup.send("Gagal memeriksa status auto-mention.", ephemeral=True)
 
     @app_commands.command(name="analyze", description="Analyze an image from URL using VLM")
     @app_commands.describe(
@@ -650,7 +668,6 @@ class SlashCommands(commands.Cog):
                 color=discord.Color.teal()
             )
 
-            import io
             file = discord.File(io.BytesIO(result["data"]), filename="screenshot.png")
             embed.set_image(url="attachment://screenshot.png")
             embed.set_footer(text=f"Analyzed by {interaction.user.display_name}")

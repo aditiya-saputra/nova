@@ -36,7 +36,7 @@ class CompactionEngine:
                 logger.error(f"Compaction Groq failed for {key}: {e}")
                 return False
 
-            self.session_manager.replace_history(key, summary)
+            await self.session_manager.replace_history(key, summary)
 
             usage_after = self.session_manager.get_token_usage(key)
             logger.info(f"Compacted session {key}: {usage:.1%} -> {usage_after:.1%}")

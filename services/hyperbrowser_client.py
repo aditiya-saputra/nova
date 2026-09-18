@@ -173,13 +173,25 @@ class HyperbrowserClient:
                 try:
                     import aiohttp
 
+                    MAX_SCREENSHOT_BYTES = 20 * 1024 * 1024  # 20MB limit
                     session = await self._guard._get_session()
                     async with session.get(
                         s, timeout=aiohttp.ClientTimeout(total=30), allow_redirects=False
                     ) as resp:
                         if resp.status != 200:
                             return None
-                        return await resp.read()
+                        content_type = resp.headers.get("Content-Type", "")
+                        if not content_type.startswith("image/"):
+                            logger.warning(f"Hyperbrowser screenshot: unexpected Content-Type: {content_type}")
+                            return None
+                        # Stream with size limit
+                        data = bytearray()
+                        async for chunk in resp.content.iter_chunked(64 * 1024):
+                            data.extend(chunk)
+                            if len(data) > MAX_SCREENSHOT_BYTES:
+                                logger.warning("Hyperbrowser screenshot exceeded size limit")
+                                return None
+                        return bytes(data)
                 except Exception as e:
                     logger.error(f"Hyperbrowser screenshot download error: {e}")
                     return None

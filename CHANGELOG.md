@@ -4,6 +4,132 @@ All notable changes to this project will be documented in this file.
 
 ---
 
+## [1.15.0] - 2026-09-18
+
+### 🐛 Fixed (20 bugs — Context7 audit)
+
+#### Critical (5)
+- **Audit log auth bypass** (`services/tool_executor.py:390`): `get_audit_logs` tool only checked permissions when both `channel_id` AND `user_id` were provided. If either was missing, audit logs (including deleted messages, tool args, errors) were returned without authorization. Now requires both and validates moderator/admin permission. **Security: high.**
+- **Gemini no-keys crash** (`services/gemini_client.py:147`): `_run_with_fallback()` looped `range(len(self.keys))` — with zero keys, no API call occurred, `last_error` remained `None`, and `raise last_error` produced unhelpful `TypeError`. Now raises `ValueError("No Gemini API keys configured")` early.
+- **File attachment limit bypass** (`handlers/message_handler.py:541`): `_build_final_prompt` appended file contents directly without calling `format_for_prompt()`, bypassing `MAX_TOTAL_CHARS=20000`. Up to ~40K chars could be injected. Now uses `FileProcessor.format_for_prompt()` which enforces the limit.
+- **`/welcome` no permission check** (`cogs/slash_commands.py:405`): Any user could invoke `/welcome` to send bot-generated mentions to arbitrary channels. Added `@app_commands.checks.has_permissions(manage_messages=True)`.
+- **Hyperbrowser screenshot unbounded download** (`services/hyperbrowser_client.py:152`): `_coerce_image_bytes` followed screenshot URLs and read entire response into memory without size limit or content-type check. Added 20MB limit, content-type validation, and streaming chunked read.
+
+#### Medium (8)
+- **Settings crash on invalid env** (`config/settings.py:39-40,58-59`): `GEMINI_CONTEXT_LIMIT`, `GEMINI_OUTPUT_LIMIT`, `NUGGETS_TTL_DAYS`, `NUGGETS_TOP_K` used direct `int()` conversion, crashing at import on invalid values. Now uses `_safe_int`/`_safe_float` helpers. **CHANGELOG 1.11.0 claim was incomplete.**
+- **TTL prune mismatch** (`memory/scheduled_jobs.py:87`): `TTL_PRUNE_DAYS` defaulted to 30 days, while RAG nuggets use `NUGGETS_TTL_DAYS` (default 3 days). Expired nuggets persisted up to 30 days. Now defaults to `NUGGETS_TTL_DAYS` value.
+- **RAG lock eviction race** (`memory/rag_store.py:32`): LRU eviction deleted locks without checking if they were actively held (`locked()`). A new lock for the same channel could be created while the old operation was still running, allowing concurrent writes. Now skips locked entries.
+- **Audit timestamp naive** (`memory/audit_logger.py:30`): `log()` used `datetime.now()` (host timezone) instead of `datetime.now(timezone.utc)`. Inconsistent with documented UTC storage contract. Now uses UTC.
+- **`get_logs_by_type` returns oldest** (`memory/audit_logger.py:123`): Scanned file from beginning, returning oldest matching entries while UIs described "recent/last". Now reads from end (most recent first) and reverses for chronological order.
+- **Sholat config relative path** (`memory/scheduled_jobs.py:11`): Used literal `data/sholat_config.json` instead of `Settings.DATA_DIR`. Running from different working directory caused config to disappear. Now uses `Path(Settings.DATA_DIR) / "sholat_config.json"`.
+- **Sholat role ID env ignored** (`memory/scheduled_jobs.py:283`): Reminder used only JSON config's `role_id`, ignoring `SHOLAT_ROLE_ID` from `.env`. Now falls back to env setting when JSON is empty.
+- **Gemini VLM Part constructor** (`services/gemini_client.py:469`): Image parts used `types.Part(inline_data=...)` instead of `types.Part.from_blob(...)`. Could produce incorrect Part objects. Now uses factory method. **CHANGELOG 1.14.0 claim was incomplete.**
+
+#### Low (7)
+- **`/history` no permission check** (`cogs/slash_commands.py:221`): Any user could view channel conversation history. Added `manage_messages` permission requirement.
+- **Voice raw exception leak** (`cogs/voice.py:89,171`): Voice join errors sent raw `str(e)` to users, leaking internal details. Now sends generic message.
+- **`read_attachment` filename collision** (`services/tool_executor.py:692`): Cache lookup matched first filename found in insertion order. When multiple messages had same filename, stale content could be returned. Now searches newest message first (sorted keys, reverse).
+- **Tracker eviction inconsistency** (`handlers/message_handler.py:595`): Three tracker dictionaries were evicted independently, causing keys to exist in one but not others. Now collects all keys, sorts, and evicts consistently across all three dicts.
+- **HistoryStore key collision** (`memory/history_store.py:18`): Sanitized keys by removing invalid chars — `a/b` and `ab` mapped to same file. Now uses SHA1 hash of key for unique filenames.
+- **`get_all_opted_in` crash** (`memory/mention_store.py:109`): Blindly converted all opted-in keys to `int()`. Malformed `preferences.json` caused `ValueError`. Now wraps in try/except per key.
+- **`/sholat` validation mismatch** (`cogs/sholat.py:93`): Error said "1-30" but `days=0` was intentionally handled as "today". Updated message to "0-30".
+
+### 📁 File Changes
+```
+services/tool_executor.py       # Auth required for get_audit_logs, read_attachment newest-first
+services/gemini_client.py       # No-keys ValueError, Part.from_blob for VLM
+services/hyperbrowser_client.py # Bounded screenshot download (20MB, content-type, streaming)
+handlers/message_handler.py     # format_for_prompt for file limits, consistent tracker eviction
+cogs/slash_commands.py          # /welcome + /history permission checks
+cogs/voice.py                   # Generic voice error messages
+cogs/sholat.py                  # Validation message 0-30
+config/settings.py              # _safe_int for GEMINI_CONTEXT/OUTPUT_LIMIT, NUGGETS_*
+memory/audit_logger.py          # UTC timestamps, get_logs_by_type newest-first
+memory/rag_store.py             # Skip locked entries during LRU eviction
+memory/scheduled_jobs.py        # Absolute config path, TTL default, role ID fallback
+memory/history_store.py         # SHA1-hashed keys to prevent collision
+memory/mention_store.py         # Graceful handling of malformed preference keys
+```
+
+---
+
+## [1.14.0] - 2026-09-17
+
+### 🐛 Fixed (17 bugs — deep scan)
+
+#### Critical (6)
+- **Gemini history always empty** (`handlers/message_handler.py:45`): `_to_gemini_history` filtered messages with `role not in ("user", "model")`, but `SessionManager` stores role as `"assistant"`. All assistant messages were silently dropped — Gemini received zero conversation history. Now maps `"assistant"` → `"model"`.
+- **Event loop blocked during compaction** (`memory/session_manager.py:88`): `replace_history()` called sync `HistoryStore` file I/O directly from async context, blocking the entire event loop during history compaction. Now wraps file I/O in `asyncio.to_thread`.
+- **Race condition in Gemini key rotation** (`services/gemini_client.py:144`): `_get_next_key()` mutated `current_index` without lock. Concurrent Gemini calls (e.g., multiple slash commands) could use the same API key, accelerating rate limits. Added `asyncio.Lock` guard.
+- **Sholat reminder timezone mismatch** (`memory/scheduled_jobs.py:203`): `_check_sholat_reminder` received `datetime.now()` (server local time) but prayer times from API are in WIB. If server runs in UTC, all reminders fired at wrong times. Now uses `datetime.now(WIB)` for comparison.
+- **RagStore unbounded lock memory leak** (`memory/rag_store.py:28`): `_channel_locks` dict grew forever — one `asyncio.Lock` per channel ID across all guilds. Added LRU eviction at `MAX_LOCKS=500`.
+- **SessionManager eviction crash** (`memory/session_manager.py:119`): `_evict_if_needed` sorted `self.last_activity` keys, but some sessions might not have entries in `last_activity`, causing `KeyError`. Now sorts from `self.sessions.keys()` instead.
+
+#### Medium (7)
+- **Audit log race on read** (`memory/audit_logger.py:104`): `get_recent_logs` read the audit file without acquiring `_file_lock`, potentially reading partial writes from concurrent threads. Now reads under lock.
+- **SSRF bypass via IPv6 URL** (`services/browserless_client.py:132`): IPv6 check only matched exact `::1`. URLs like `http://[::ffff:127.0.0.1]` or `http://[0:0:0:0:0:ffff:127.0.0.1]` bypassed the block. Now strips brackets and checks mapped IPv4 addresses.
+- **FactExtractor silent failure** (`handlers/fact_extractor.py:32`): `extract_and_save` swallowed all exceptions without logging, making Groq extraction failures invisible. Now logs the error.
+- **Background tasks GC'd before completion** (`handlers/message_handler.py:36`): `_spawn` created tasks via `create_task` but never stored the reference. Tasks could be garbage-collected before finishing. Added `task_set` tracking with `done_callback` cleanup.
+- **SholatClient cache data race** (`services/sholat_client.py:258`): `get_today_prayer_times` returned a direct reference to the cached dict, which could be mutated by concurrent async writes. Now returns a copy.
+- **Compaction sync file I/O** (`memory/compaction_engine.py:39`): `check_and_compact` called sync `session_manager.replace_history` which blocked the event loop. Updated to `await` the now-async method.
+- **HistoryStore `__import__` anti-pattern** (`memory/history_store.py:52`): `__import__("time").time()` called on every message append. Moved `time` to module-level import.
+
+#### Low (4)
+- **MentionStore `NameError` on save failure** (`memory/mention_store.py:36`): If `tempfile.mkstemp()` failed, the `tmp` variable was undefined, causing `NameError` in the exception handler. Now initializes `tmp = None` before try block.
+- **SlashCommands inline imports** (`cogs/slash_commands.py:76,412,653`): `import asyncio`, `import random`, `import io` inside methods on every invocation. Moved to module-level imports.
+- **Gemini Part constructor** (`services/gemini_client.py:464`): `types.Part(text=prompt)` used direct constructor instead of `types.Part.from_text(text=prompt)`. Could produce incorrect Part objects depending on SDK version.
+- **File attachment cache FIFO cleanup** (`handlers/message_handler.py:179`): `list(cache.keys())[:50]` did not guarantee FIFO order after deletions. Now uses `list(cache.keys())[:-50:-1]` for correct oldest-first eviction.
+
+### 📁 File Changes
+```
+handlers/message_handler.py     # role mapping, task tracking, cache FIFO
+memory/session_manager.py       # async replace_history, eviction fix, asyncio import
+memory/compaction_engine.py     # await replace_history
+memory/history_store.py         # time import, remove __import__
+memory/rag_store.py             # LRU lock eviction
+memory/audit_logger.py          # read with lock
+memory/mention_store.py         # NameError guard
+memory/scheduled_jobs.py        # WIB timezone for sholat
+services/gemini_client.py       # key rotation lock, Part.from_text
+services/browserless_client.py  # IPv6 SSRF bypass fix
+services/sholat_client.py       # cache copy
+handlers/fact_extractor.py      # error logging
+cogs/slash_commands.py          # module-level imports
+```
+
+---
+
+## [1.13.0] - 2026-09-17
+
+### ✨ Added (Jadwal Sholat & Auto-Reminder)
+- **`services/sholat_client.py`** (NEW): API client untuk jadwal sholat — myQuran v3 (primary, data Kementerian Agama RI) + AlAdhan (fallback global, no API key).
+  - `get_today()` / `get_date()` / `get_range()` — jadwal sholat hari ini, tanggal tertentu, atau N hari ke depan
+  - `get_qibla()` — arah kiblat dari koordinat kota
+  - `search_city()` — cari kota di myQuran (517 kota Indonesia)
+  - `generate_reminder()` — pesan reminder tsundere via Gemini (system instruction pakai `personality.txt`); fallback template statis jika Gemini down
+  - In-memory cache per hari untuk mengurangi API calls
+- **`cogs/sholat.py`** (NEW): 7 slash commands:
+  - `/sholat [days]` — jadwal sholat hari ini atau N hari ke depan (max 30)
+  - `/sholat-kiblat` — arah kiblat dalam derajat + kompas
+  - `/sholat-status` — cek konfigurasi (kota, method, channel, role, status)
+  - `/sholat-set-channel #channel` — set channel untuk auto-reminder (admin)
+  - `/sholat-set-role @Role` — set role untuk mention di reminder (admin)
+  - `/sholat-set-city Jakarta` — cari dan set kota via myQuran API (admin)
+- **Auto-Reminder** (`memory/scheduled_jobs.py`): reminder check di `prune_loop` setiap 60 detik, kirim pesan 10 menit sebelum waktu sholat ke channel yang dikonfigurasi. Role mention `<@&ROLE_ID>` untuk notifikasi user yang sudah assign role.
+- **Config** (`config/settings.py`): 9 env vars baru — `SHOLAT_ENABLED`, `SHOLAT_CITY_ID`, `SHOLAT_CITY_NAME`, `SHOLAT_LAT`, `SHOLAT_LNG`, `SHOLAT_METHOD`, `SHOLAT_TIMEZONE`, `SHOLAT_ROLE_ID`, `SHOLAT_REMINDER_MINUTES`.
+
+### 📁 File Changes
+```
+services/sholat_client.py      # NEW: myQuran + AlAdhan API client + AI reminder
+cogs/sholat.py                 # NEW: 7 slash commands for jadwal sholat
+memory/scheduled_jobs.py       # +sholat reminder check in prune_loop, load/save_sholat_config
+config/settings.py             # +9 SHOLAT_* env vars
+main.py                        # +SholatClient wiring + load cogs.sholat
+.env.example                   # +sholat settings documentation
+```
+
+---
+
 ## [1.12.0] - 2026-09-15
 
 ### ✨ Added (Voice AFK)
@@ -11,7 +137,7 @@ All notable changes to this project will be documented in this file.
   - `/afk` / `!afk` — Join voice channel, self-deafen, duduk manis
   - `/unafk` / `!unafk` — Leave voice channel
   - Activity status berubah otomatis: "AFK di #channel_name"
-- **`PyNaCl`** ditambahkan ke `requirements.txt` untuk voice support
+- **`discord.py[voice]`** (includes PyNaCl) + opus library auto-load check — voice commands gracefully disable when `libopus` is missing
 - **Voice intent** (`voice_states=True`) ditambahkan di `core/bot.py`
 
 ### 🐛 Fixed

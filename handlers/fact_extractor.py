@@ -29,7 +29,8 @@ class FactExtractor:
 
             await self.audit_logger.log_rag_extract(channel_id, len(facts))
             return saved
-        except Exception:
+        except Exception as e:
+            logger.error(f"Fact extraction error: {e}")
             return 0
 
     async def retrieve_relevant_facts(self, query, channel_id, top_k=5):

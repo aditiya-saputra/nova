@@ -34,6 +34,7 @@ class MentionStore:
 
     def _save_preferences(self):
         import tempfile
+        tmp = None
         try:
             fd, tmp = tempfile.mkstemp(dir=str(self.mentions_dir), suffix='.json.tmp')
             with os.fdopen(fd, 'w', encoding='utf-8') as f:
@@ -41,10 +42,11 @@ class MentionStore:
             os.replace(str(tmp), str(self.preferences_file))
         except Exception as e:
             logger.error(f"Failed to save mention preferences: {e}")
-            try:
-                os.unlink(str(tmp))
-            except Exception:
-                pass
+            if tmp is not None:
+                try:
+                    os.unlink(str(tmp))
+                except Exception:
+                    pass
 
     def get_user_pref(self, user_id):
         user_id = str(user_id)
@@ -105,11 +107,14 @@ class MentionStore:
         self._save_preferences()
 
     def get_all_opted_in(self):
-        return [
-            int(uid)
-            for uid, pref in self.preferences.items()
-            if pref.get("opt_in", False)
-        ]
+        result = []
+        for uid, pref in self.preferences.items():
+            if pref.get("opt_in", False):
+                try:
+                    result.append(int(uid))
+                except (ValueError, TypeError):
+                    logger.warning(f"Skipping malformed preference key: {uid}")
+        return result
 
     def get_stats(self):
         total = len(self.preferences)

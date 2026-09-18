@@ -7,6 +7,7 @@ from services.tavily_client import TavilyClient
 from services.browserless_client import BrowserlessClient
 from services.hyperbrowser_client import HyperbrowserClient
 from services.tool_executor import ToolExecutor
+from services.sholat_client import SholatClient
 from memory.session_manager import SessionManager
 from memory.history_store import HistoryStore
 from memory.rag_store import RagStore
@@ -53,6 +54,8 @@ async def main():
     )
     tool_executor = ToolExecutor(bot)
     file_processor = FileProcessor()
+    sholat_client = SholatClient(settings, gemini)
+    sholat_client._bot = bot
 
     for name, obj in {
         "gemini": gemini, "groq": groq, "tavily": tavily, "browserless": browserless,
@@ -62,12 +65,14 @@ async def main():
         "audit_logger": audit_logger, "github_backup": github_backup,
         "mention_store": mention_store, "compaction_engine": compaction_engine,
         "tool_executor": tool_executor, "file_processor": file_processor,
+        "sholat_client": sholat_client,
     }.items():
         setattr(bot, name, obj)
 
     github_backup.attach_audit(audit_logger)
 
     scheduled_jobs = ScheduledJobs(settings, audit_logger, github_backup)
+    scheduled_jobs.sholat_client = sholat_client
     bot.scheduled_jobs = scheduled_jobs
     bot.welcome_back_enabled = True
 
@@ -79,7 +84,7 @@ async def main():
     )
     bot.message_handler = message_handler
 
-    for ext in ("cogs.ai_commands", "cogs.admin_commands", "cogs.dynamic_presence", "cogs.slash_commands", "cogs.voice"):
+    for ext in ("cogs.ai_commands", "cogs.admin_commands", "cogs.dynamic_presence", "cogs.slash_commands", "cogs.voice", "cogs.sholat"):
         await bot.load_extension(ext)
     logger.info("Slash commands loaded!")
 
@@ -172,6 +177,12 @@ async def main():
             fp = getattr(bot, "file_processor", None)
             if fp is not None and hasattr(fp, "aclose"):
                 await fp.aclose()
+        except Exception:
+            pass
+        try:
+            sc = getattr(bot, "sholat_client", None)
+            if sc is not None and hasattr(sc, "aclose"):
+                await sc.aclose()
         except Exception:
             pass
         if not bot.is_closed():

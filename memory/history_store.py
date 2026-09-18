@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 import threading
 from pathlib import Path
 from config.settings import Settings
@@ -15,7 +16,10 @@ class HistoryStore:
         self._lock = threading.Lock()
 
     def _get_file_path(self, key):
-        return self.base_dir / f"{key}.jsonl"
+        # Use hash to prevent key collision from sanitized paths (e.g. a/b vs ab)
+        import hashlib
+        safe_key = hashlib.sha1(str(key).encode("utf-8")).hexdigest()[:16]
+        return self.base_dir / f"{safe_key}.jsonl"
 
     def load(self, key):
         history = []
@@ -49,7 +53,7 @@ class HistoryStore:
             "user_id": user_id,
             "role": role,
             "content": content,
-            "timestamp": __import__("time").time()
+            "timestamp": time.time()
         }
         self.append(key, entry)
 
@@ -61,7 +65,7 @@ class HistoryStore:
             "user_id": user_id,
             "role": "system",
             "content": f"[COMPACTION] {summary}",
-            "timestamp": __import__("time").time()
+            "timestamp": time.time()
         }
         self.append(key, entry)
 
